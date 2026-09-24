@@ -46,7 +46,7 @@ jobs:
           PROJ_DIR=$(dirname "$PROJ")
           cd "$PROJ_DIR"
           xcodebuild -list -project "$PROJ_NAME"
-          SCHEME=$(xcodebuild -list -project "$PROJ_NAME" | awk '/Schemes:/{f=1;next} f&&NF{print;exit}' | head -1)
+          SCHEME=$(xcodebuild -list -project "$PROJ_NAME" | awk '/Schemes:/{f=1;next} f&&NF{gsub(/^[ \t]+/,""); print; exit}' | head -1)
           echo "scheme: $SCHEME"
           xcodebuild -project "$PROJ_NAME" \
             -scheme "$SCHEME" \
