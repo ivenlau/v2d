@@ -28,8 +28,12 @@ export interface MediaCandidate {
   durationSec?: number
   live?: boolean
   encrypted?: boolean
-  /** master playlist 的清晰度列表（hls master 展开缓存） */
+  /** master playlist 的清晰度列表（hls/dash 展开缓存） */
   variants?: HlsVariant[]
+  /** dash：与清晰度配套的音频轨地址（站点适配器填充） */
+  dashAudioUrl?: string
+  /** dash：音轨允许缺失（探测存在才挂载；失败降级纯视频合成） */
+  dashAudioOptional?: boolean
   fileName?: string
   pageTitle?: string
   /** 已探测（大小/Playlist 信息已知） */
@@ -46,6 +50,13 @@ export interface V115Settings {
   targetRoot?: string
   /** 用户自定义开放平台 app_id（空 = 公共测试 AppID） */
   appId?: number
+}
+
+/** DASH 双轨描述符（Reddit 等音轨缺失场景用 audioOptional 降级为纯视频合成） */
+export interface DashSpec {
+  video: string
+  audio?: string
+  audioOptional?: boolean
 }
 
 export interface Settings {

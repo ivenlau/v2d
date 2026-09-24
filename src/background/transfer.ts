@@ -5,7 +5,7 @@
  * 任务元数据存 chrome.storage.local（M2 量级足够；M4 换 IndexedDB）。
  */
 
-import type { MediaCandidate, V115Settings } from '@/core/types'
+import type { DashSpec, MediaCandidate, V115Settings } from '@/core/types'
 import { classifyLink } from '@/providers/115/offline'
 import type { OfflineTask } from '@/providers/115/openapi'
 import { offlineDone, offlineFailed } from '@/providers/115/openapi'
@@ -17,6 +17,7 @@ export type TaskState =
   | 'offline-polling'
   | 'downloading'
   | 'hashing'
+  | 'transmuxing'
   | 'checking'
   | 'uploading'
   | 'saving'
@@ -27,8 +28,8 @@ export type TaskState =
 
 export interface TransferTask {
   id: string
-  kind: 'offline' | 'upload' | 'hls'
-  /** cloud = 转存 115；local = 保存本地（hls 走队列） */
+  kind: 'offline' | 'upload' | 'hls' | 'dash'
+  /** cloud = 转存 115；local = 保存本地（hls/dash 走队列） */
   dest: 'cloud' | 'local'
   state: TaskState
   url: string
@@ -37,6 +38,8 @@ export interface TransferTask {
   pageTitle?: string
   /** hls：用户选择的清晰度（media playlist URL）；空 = 自动选最高 */
   variantUrl?: string
+  /** dash：双轨 DASH 描述符（视频轨 + 可选音频轨直链） */
+  dashSpec?: DashSpec
   size?: number
   /** downloading：已收字节；offline：percentDone 借用 uploaded 展示 */
   received?: number
@@ -87,6 +90,11 @@ async function persist(force = false): Promise<void> {
 
 export async function listTasks(): Promise<TransferTask[]> {
   return loadTasks()
+}
+
+/** 外部（E2E/其他上下文）直接写 storage 时使内存缓存失效 */
+export function invalidateTaskCache(): void {
+  tasks = null
 }
 
 function safeHost(url: string): string {
@@ -163,11 +171,12 @@ export async function enqueueTransfer(
   pageTitle?: string,
   opts: { dest: 'cloud' | 'local'; variantUrl?: string } = { dest: 'cloud' },
 ): Promise<TransferTask> {
-  // hls/dash 候选走合并管线（M3 支持 HLS；DASH 在 M5）；直链一律浏览器直传（秒传优先）
-  const isHls = cand.kind === 'hls' || cand.kind === 'dash'
+  // hls/dash 候选走合并管线；直链一律浏览器直传（秒传优先）
+  const isHls = cand.kind === 'hls'
+  const isDash = cand.kind === 'dash'
   const task: TransferTask = {
     id: genTaskId(),
-    kind: isHls ? 'hls' : 'upload',
+    kind: isDash ? 'dash' : isHls ? 'hls' : 'upload',
     dest: opts.dest,
     state: 'queued',
     url: cand.url,
@@ -175,6 +184,15 @@ export async function enqueueTransfer(
     targetPath: joinTargetPath(settings.targetRoot, cand.url),
     pageTitle,
     variantUrl: opts.variantUrl,
+    ...(isDash
+      ? {
+          dashSpec: {
+            video: opts.variantUrl ?? cand.variants?.[0]?.url ?? cand.url,
+            ...(cand.dashAudioUrl ? { audio: cand.dashAudioUrl } : {}),
+            ...(cand.dashAudioOptional ? { audioOptional: true } : {}),
+          } satisfies DashSpec,
+        }
+      : {}),
     createdAt: Date.now(),
   }
   const all = await loadTasks()
@@ -315,6 +333,7 @@ async function pump(): Promise<void> {
         if (next.kind === 'offline') {
           await runOfflineTask(next)
         } else {
+          await ensureRefererRuleForTask(next)
           await runUploadTask(next)
         }
       } catch (e) {
@@ -442,6 +461,7 @@ async function runUploadTask(task: TransferTask): Promise<void> {
       fileName: task.fileName,
       targetPath: task.targetPath,
       ...(task.variantUrl ? { variantUrl: task.variantUrl } : {}),
+      ...(task.dashSpec ? { dashSpec: task.dashSpec } : {}),
       // 断点续传元数据（仅直链；worker 校验 hash 状态与暂存长度一致才续传）
       ...(task.hashStateB64 ? { hashStateB64: task.hashStateB64 } : {}),
       ...(task.received !== undefined ? { received: task.received } : {}),
@@ -623,7 +643,68 @@ async function maybeCloseOffscreen(): Promise<void> {
     } catch {
       /* 本来就没开 */
     }
+    await removeRefererRule().catch(() => {})
   }
+}
+
+// ── DNR：按站点族注入 Referer（CDN 防盗链要求 UA+Referer；浏览器 fetch 无法自设 Referer） ──
+const REFERER_RULE_ID = 1001
+
+/** 已适配站点的 CDN 域 → 应携带的 Referer（新增适配器在此扩展） */
+const REFERER_RULES: Array<{ test: RegExp; referer: string }> = [
+  { test: /bilivideo\.com|bilibili\.com/, referer: 'https://www.bilibili.com/' },
+  { test: /douyin(vod)?\.com|zjcdn\.com|douyin\.com/, referer: 'https://www.douyin.com/' },
+  { test: /kuaishou\.com|gifshow\.com|yximgs\.com/, referer: 'https://www.kuaishou.com/' },
+  { test: /xhscdn\.com|xiaohongshu\.com/, referer: 'https://www.xiaohongshu.com/' },
+  // ── 海外 / 成人站（P1.5）──
+  { test: /vimeocdn\.com|vimeo\.com/, referer: 'https://vimeo.com/' },
+  { test: /tiktokcdn\w*\.com|tiktokv\w*\.com|byteoversea\.com|tiktok\.com/, referer: 'https://www.tiktok.com/' },
+  { test: /redd\.it|redditmedia\.com|reddit\.com/, referer: 'https://www.reddit.com/' },
+  { test: /phncdn\.com|pornhub\.com/, referer: 'https://www.pornhub.com/' },
+  { test: /xvideos-cdn\.com|xvideos\.com/, referer: 'https://www.xvideos.com/' },
+  { test: /xhcdn\.com|xhamster\w*\.com/, referer: 'https://xhamster.com/' },
+  { test: /xnxx-?cdn|xnxx\.com/, referer: 'https://www.xnxx.com/' },
+  { test: /youporn\.com/, referer: 'https://www.youporn.com/' },
+  { test: /spankbang\.com/, referer: 'https://spankbang.com/' },
+  { test: /eporner\.com/, referer: 'https://www.eporner.com/' },
+]
+
+async function ensureRefererRuleForTask(task: TransferTask): Promise<void> {
+  const url = task.dashSpec?.video ?? task.variantUrl ?? task.url
+  let host = ''
+  try {
+    host = new URL(url).hostname
+  } catch {
+    return
+  }
+  const matched = REFERER_RULES.find((r) => r.test.test(host))
+  if (!matched) {
+    await removeRefererRule().catch(() => {})
+    return
+  }
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [REFERER_RULE_ID],
+    addRules: [
+      {
+        id: REFERER_RULE_ID,
+        priority: 1,
+        condition: {
+          requestDomains: [host.split('.').slice(-2).join('.')],
+          resourceTypes: ['xmlhttprequest'],
+        },
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [{ header: 'Referer', operation: 'set', value: matched.referer }],
+        },
+      },
+    ],
+  })
+}
+
+async function removeRefererRule(): Promise<void> {
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [REFERER_RULE_ID],
+  })
 }
 
 function msg(e: unknown): string {

@@ -8,6 +8,7 @@ export type BgRequest =
   | { type: 'download'; tabId: number; id: string; variantUrl?: string; pageTitle?: string }
   | { type: 'hlsInfo'; tabId: number; id: string }
   | { type: 'scanDom'; tabId: number }
+  | { type: 'siteProbe'; tabId: number }
   | { type: 'transfer115'; tabId: number; id: string; pageTitle?: string; variantUrl?: string }
   | { type: 'transferList' }
   | { type: 'transferCancel'; taskId: string }

@@ -16,6 +16,7 @@ import { createMemoryStorage } from '@/providers/115/env'
 import { fastUpload115 } from '@/providers/115/upload115'
 import { OpfsStage } from '@/providers/115/staging'
 import { runHlsToStage } from '@/offscreen/hlsPipeline'
+import { runDashToStage } from '@/offscreen/dashPipeline'
 
 interface WorkerCtx {
   addEventListener(type: 'message', cb: (e: MessageEvent) => void): void
@@ -25,15 +26,17 @@ const ctx = self as unknown as WorkerCtx
 
 export interface WorkerTask {
   id: string
-  /** direct = 直链单文件；hls = m3u8 分段合并 */
-  kind: 'direct' | 'hls'
-  /** cloud = 转存 115；local = 保存本地（仅 hls 走队列） */
+  /** direct = 直链单文件；hls = m3u8 分段合并；dash = 双轨 DASH 合并（M5） */
+  kind: 'direct' | 'hls' | 'dash'
+  /** cloud = 转存 115；local = 保存本地（hls/dash 走队列） */
   dest: 'cloud' | 'local'
   url: string
   fileName: string
   targetPath: string
   /** hls：用户选择的清晰度（media playlist URL）；空 = 自动选最高 */
   variantUrl?: string
+  /** dash：双轨 DASH 描述符（视频轨 + 可选音频轨直链） */
+  dashSpec?: { video: string; audio?: string; audioOptional?: boolean }
   /** 断点续传元数据（SW 持久化后随任务下发） */
   hashStateB64?: string
   received?: number
@@ -98,6 +101,7 @@ async function runTask(task: WorkerTask): Promise<void> {
   console.log(`[V2D worker] 任务启动: ${task.id} kind=${task.kind} dest=${task.dest}`)
   try {
     if (task.kind === 'hls') await runHlsTask(task, ctrl, emit)
+    else if (task.kind === 'dash') await runDashTask(task, ctrl, emit)
     else await runDirectTask(task, ctrl, emit)
   } catch (e) {
     // runTask 内部各自 catch；到这里说明框架层异常
@@ -270,6 +274,70 @@ async function runDirectTask(
       state: 'failed',
       hashStateB64,
       received: stage?.size,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+// ── DASH 双轨（M5：mediabunny 无损合并；cloud/local 双出口，无断点） ──
+async function runDashTask(
+  task: WorkerTask,
+  ctrl: AbortController,
+  emit: (patch: Record<string, unknown>) => void,
+): Promise<void> {
+  let stage: OpfsStage | null = null
+  try {
+    const client = getClientFor(task)
+    emit({ state: 'downloading' })
+    const cid = task.dest === 'cloud' ? await client.createDirRecursive(task.targetPath) : 0
+
+    stage = await OpfsStage.open(task.id)
+    if (stage.size > 0) stage.reset() // DASH 无断点语义，清理残留
+    const result = await runDashToStage({
+      stage,
+      emit,
+      signal: ctrl.signal,
+      wantHash: task.dest === 'cloud',
+      videoUrl: task.dashSpec?.video ?? task.url,
+      audioUrl: task.dashSpec?.audio,
+      audioOptional: task.dashSpec?.audioOptional,
+    })
+    const fileName = withExt(task.fileName, result.ext)
+
+    if (task.dest === 'local') {
+      emit({ state: 'hashing', received: result.size, size: result.size })
+      await stage.close()
+      stage = null
+      ctx.postMessage({ type: 'v2d/task-staged', taskId: task.id, fileName, size: result.size })
+      return
+    }
+
+    emit({ state: 'checking', size: result.size })
+    emit({ state: 'uploading', uploaded: 0, size: result.size })
+    let lastUp = 0
+    const res = await fastUpload115(client, {
+      fileName,
+      size: result.size,
+      cid,
+      sha1Hex: result.sha1,
+      source: stage.byteSource(),
+      signal: ctrl.signal,
+      onUploaded: (uploaded, total) => {
+        const now = Date.now()
+        if (now - lastUp >= 500 || uploaded >= total) {
+          emit({ state: 'uploading', uploaded, size: total, speedBps: undefined })
+          lastUp = now
+        }
+      },
+    })
+
+    await stage.dispose()
+    stage = null
+    emit({ state: 'done', size: result.size, pickCode: res.pickCode, instant: res.instant })
+  } catch (err) {
+    await stage?.dispose()
+    emit({
+      state: ctrl.signal.aborted ? 'cancelled' : 'failed',
       error: err instanceof Error ? err.message : String(err),
     })
   }

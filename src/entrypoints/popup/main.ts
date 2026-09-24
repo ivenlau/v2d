@@ -111,14 +111,7 @@ function appendActions(actions: HTMLElement, c: MediaCandidate, item: HTMLElemen
     return
   }
   if (c.kind === 'hls' || c.kind === 'dash') {
-    if (c.kind === 'dash') {
-      const note = document.createElement('span')
-      note.className = 'note'
-      note.textContent = 'DASH 合并下载 · 后续版本'
-      actions.appendChild(note)
-      return
-    }
-    // HLS：默认用最高码率；展开可逐清晰度选择
+    // 默认用最高码率；展开可逐清晰度选择（dash 的 variants 由站点探针预填）
     const best = c.variants?.[0]?.url
     const dl = document.createElement('button')
     dl.className = 'btn primary'
@@ -208,6 +201,31 @@ async function transferHls(
   btn.disabled = false
 }
 
+function variantRow(
+  cand: MediaCandidate,
+  v: { url: string; quality?: string; resolution?: string; name?: string; bandwidth?: number },
+): HTMLElement {
+  const row = document.createElement('div')
+  row.className = 'variant'
+  const label = v.quality ?? v.resolution ?? v.name ?? (v.bandwidth ? `${Math.round(v.bandwidth / 1000)}kbps` : '未知清晰度')
+  row.innerHTML = `<span class="badge file" style="background:var(--accent-soft);color:var(--accent)">${label}</span><span class="name">${v.bandwidth ? Math.round(v.bandwidth / 1000) + 'kbps' : ''}</span>`
+  const dl = document.createElement('button')
+  dl.className = 'btn'
+  dl.textContent = '⬇'
+  dl.title = '合并下载为 MP4'
+  dl.addEventListener('click', () => void transferHls(cand, 'local', v.url, dl))
+  row.appendChild(dl)
+  if (v115Enabled) {
+    const up = document.createElement('button')
+    up.className = 'btn'
+    up.textContent = '☁'
+    up.title = '合并转存到 115'
+    up.addEventListener('click', () => void transferHls(cand, 'cloud', v.url, up))
+    row.appendChild(up)
+  }
+  return row
+}
+
 async function expandHls(c: MediaCandidate, item: HTMLElement): Promise<void> {
   let box = item.querySelector('.variants') as HTMLElement | null
   if (box) {
@@ -218,6 +236,17 @@ async function expandHls(c: MediaCandidate, item: HTMLElement): Promise<void> {
   box.className = 'variants'
   box.innerHTML = '<div class="note">解析中…</div>'
   item.appendChild(box)
+
+  // DASH：清晰度数据由站点探针预填，无需联网解析
+  if (c.kind === 'dash') {
+    box.innerHTML = ''
+    if (!c.variants?.length) {
+      box.innerHTML = '<div class="note">无清晰度数据，请播放视频后重试</div>'
+      return
+    }
+    for (const v of c.variants) box.appendChild(variantRow(c, v))
+    return
+  }
 
   const r = await send<{ candidate: MediaCandidate; error?: string }>({
     type: 'hlsInfo',
@@ -231,27 +260,7 @@ async function expandHls(c: MediaCandidate, item: HTMLElement): Promise<void> {
   }
   box.innerHTML = ''
   if (cand.variants?.length) {
-    for (const v of cand.variants) {
-      const row = document.createElement('div')
-      row.className = 'variant'
-      const label = v.resolution ?? v.name ?? (v.bandwidth ? `${Math.round(v.bandwidth / 1000)}kbps` : '未知清晰度')
-      row.innerHTML = `<span class="badge file" style="background:var(--accent-soft);color:var(--accent)">${label}</span><span class="name">${v.bandwidth ? Math.round(v.bandwidth / 1000) + 'kbps' : ''}</span>`
-      const dl = document.createElement('button')
-      dl.className = 'btn'
-      dl.textContent = '⬇'
-      dl.title = '合并下载为 MP4'
-      dl.addEventListener('click', () => void transferHls(cand, 'local', v.url, dl))
-      row.appendChild(dl)
-      if (v115Enabled) {
-        const up = document.createElement('button')
-        up.className = 'btn'
-        up.textContent = '☁'
-        up.title = '合并转存到 115'
-        up.addEventListener('click', () => void transferHls(cand, 'cloud', v.url, up))
-        row.appendChild(up)
-      }
-      box.appendChild(row)
-    }
+    for (const v of cand.variants) box.appendChild(variantRow(cand, v))
   } else {
     const bits: string[] = []
     if (cand.segments) bits.push(`${cand.segments} 个分段`)
@@ -283,8 +292,9 @@ async function init(): Promise<void> {
   const settings = await loadSettings()
   v115Enabled = settings.v115.enabled
 
-  // 首次打开做一次 DOM 扫描（引擎 B，§4.2）
+  // 首次打开做一次 DOM 扫描（引擎 B，§4.2）+ 站点探针（M5 适配层）
   await send({ type: 'scanDom', tabId })
+  await send({ type: 'siteProbe', tabId }).catch(() => {})
   await refresh()
 
   // 懒探测前 3 个未探测项

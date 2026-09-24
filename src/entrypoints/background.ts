@@ -25,6 +25,7 @@ import { buildFileName } from '@/core/name'
 import { loadSettings } from '@/core/settings'
 import type { MediaCandidate, Settings } from '@/core/types'
 import type { BgRequest } from '@/core/messages'
+import { SITE_PROBES } from '@/background/siteProbes'
 import {
   applyTaskEvent,
   cancelTask,
@@ -33,6 +34,7 @@ import {
   enqueueOffline,
   enqueueTransfer,
   handleTaskBlob,
+  invalidateTaskCache,
   listTasks,
   pauseTask,
   recoverStuckTasks,
@@ -247,17 +249,14 @@ async function handle(req: BgRequest): Promise<unknown> {
     case 'download': {
       const cand = await getCandidate(req.tabId, req.id)
       if (!cand) return { error: 'candidate not found' }
-      // HLS/DASH 走合并队列（M3：HLS；DASH 待 M5）
-      if (cand.kind === 'hls') {
+      // HLS/DASH 走合并队列
+      if (cand.kind === 'hls' || cand.kind === 'dash') {
         const settings = await loadSettings()
         const task = await enqueueTransfer(cand, settings.v115, req.pageTitle, {
           dest: 'local',
           variantUrl: req.variantUrl,
         })
         return { ok: true, queued: true, taskId: task.id }
-      }
-      if (cand.kind === 'dash') {
-        return { ok: false, reason: 'DASH 分段合并下载将在后续版本支持' }
       }
       return download(cand, req.variantUrl, req.pageTitle)
     }
@@ -273,14 +272,43 @@ async function handle(req: BgRequest): Promise<unknown> {
         return { error: e instanceof Error ? e.message : String(e) }
       }
     }
+    case 'siteProbe': {
+      // 站点适配层入口（M5）：注册表分发；失败静默（popup 不受影响）
+      try {
+        const tab = await chrome.tabs.get(req.tabId)
+        const host = tab.url ? new URL(tab.url).hostname : ''
+        const { blacklist } = await getSettings()
+        if (!host || hostInBlacklist(host, blacklist)) return { ok: false }
+        const probe = SITE_PROBES.find((p) => p.hostPattern.test(host))
+        if (!probe) return { ok: false }
+        const cands = await probe.run(req.tabId)
+        let added = false
+        const newCands: MediaCandidate[] = []
+        for (const c of cands) {
+          if (!markSeen(req.tabId, c.id)) {
+            await updateCandidate(req.tabId, c.id, {
+              variants: c.variants,
+              dashAudioUrl: c.dashAudioUrl,
+            })
+            continue
+          }
+          added = true
+          newCands.push(c)
+        }
+        if (newCands.length) {
+          const all = await addCandidates(req.tabId, newCands)
+          await updateBadge(req.tabId, all.length)
+        }
+        return { ok: true, count: cands.length, added }
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) }
+      }
+    }
     case 'transfer115': {
       const cand = await getCandidate(req.tabId, req.id)
       if (!cand) return { error: 'candidate not found' }
       if (cand.kind === 'blob') {
         return { ok: false, reason: '页面内嵌流（blob:）暂不支持转存' }
-      }
-      if (cand.kind === 'dash') {
-        return { ok: false, reason: 'DASH 分段合并转存将在后续版本支持' }
       }
       const settings = await loadSettings()
       if (!settings.v115.enabled) {
@@ -290,7 +318,11 @@ async function handle(req: BgRequest): Promise<unknown> {
         dest: 'cloud',
         variantUrl: req.variantUrl,
       })
-      return { ok: true, taskId: task.id, channel: task.kind === 'hls' ? 'hls-merge' : 'upload' }
+      return {
+        ok: true,
+        taskId: task.id,
+        channel: task.kind === 'hls' ? 'hls-merge' : task.kind === 'dash' ? 'dash-merge' : 'upload',
+      }
     }
     case 'transferList':
       return { tasks: await listTasks() }
@@ -324,8 +356,11 @@ async function handle(req: BgRequest): Promise<unknown> {
 export default defineBackground(() => {
   chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR })
 
-  chrome.storage.onChanged.addListener((_changes, area) => {
-    if (area === 'local') settingsCache = null
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local') {
+      settingsCache = null
+      if (changes['transfer.tasks']) invalidateTaskCache()
+    }
   })
 
   // 引擎 A：观察式监听（MV3 允许观察，不允许阻断）

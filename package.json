@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "hash-wasm": "^4.12.0",
+    "mediabunny": "^1.59.1",
     "mux.js": "^6.3.0",
     "qrcode": "^1.5.4"
   }

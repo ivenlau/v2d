@@ -16,6 +16,8 @@ export default defineConfig({
       'activeTab',
       'webRequest',
       'offscreen',
+      // 会话规则注入 Referer（B站等 CDN 防盗链；配合已有 <all_urls> host 权限）
+      'declarativeNetRequest',
     ],
     host_permissions: ['<all_urls>'],
     optional_host_permissions: ['*://*.115.com/*', '*://*.aliyuncs.com/*'],
