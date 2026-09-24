@@ -1,0 +1,64 @@
+name: iOS Build
+
+# 手动触发，或在打 tag 时自动出包
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建 Safari 扩展（MV2）
+        run: pnpm exec wxt build -b safari
+
+      - name: 转换为 Xcode 工程
+        run: |
+          xcrun safari-web-extension-converter .output/safari-mv2 \
+            --project-location .output/ios \
+            --app-name "V2D" \
+            --bundle-identifier "com.ivenlau.v2d" \
+            --ios-only \
+            --no-open --no-prompt
+
+      - name: 编译（未签名）
+        run: |
+          cd .output/ios
+          xcodebuild -list -project V2D.xcodeproj
+          SCHEME=$(xcodebuild -list -project V2D.xcodeproj | awk '/Targets:/{f=1;next} f&&NF{print;exit}')
+          echo "scheme: $SCHEME"
+          xcodebuild -project V2D.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: 打包 IPA
+        run: |
+          APP=$(find .output/ios/build/Build/Products -name "*.app" -maxdepth 4 | head -1)
+          echo "app: $APP"
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -qry V2D-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v2d-ios-unsigned
+          path: V2D-unsigned.ipa

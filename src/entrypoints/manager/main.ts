@@ -37,6 +37,7 @@ const STATE_LABEL: Record<string, string> = {
   checking: '秒传检测中',
   uploading: '上传中',
   saving: '保存本地',
+  staged: '待保存',
   paused: '已暂停',
   done: '已完成',
   failed: '失败',
@@ -80,8 +81,7 @@ function taskPercent(t: TaskView): number | null {
   if (t.state === 'uploading' && t.size) return Math.min(100, Math.round(((t.uploaded ?? 0) / t.size) * 100))
   if (t.state === 'downloading' && t.size) return Math.min(100, Math.round(((t.received ?? 0) / t.size) * 100))
   if (t.state === 'offline-polling') return Math.min(100, t.uploaded ?? 0)
-  if (t.state === 'saving') return 100
-  if (t.state === 'done') return 100
+  if (t.state === 'saving' || t.state === 'staged' || t.state === 'done') return 100
   return null
 }
 
@@ -132,8 +132,36 @@ function renderTask(t: TaskView): HTMLElement {
   if (t.state === 'failed' || t.state === 'cancelled') {
     actions.appendChild(button('↻ 重试', act('transferRetry', t.id), true))
   }
-  if (!TERMINAL.has(t.state) && t.state !== 'saving') {
+  if (t.state === 'staged') {
+    const save = document.createElement('button')
+    save.className = 'btn primary'
+    save.textContent = '⬇ 保存到文件'
+    save.addEventListener('click', async () => {
+      save.disabled = true
+      const r = await send<{ ok: boolean; blobUrl?: string; fileName?: string; error?: string }>({
+        type: 'getStagedBlob',
+        taskId: t.id,
+      })
+      if (r?.ok && r.blobUrl) {
+        const a = document.createElement('a')
+        a.href = r.blobUrl
+        a.download = r.fileName ?? t.fileName
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
+        await refresh()
+      } else {
+        save.disabled = false
+      }
+    })
+    actions.appendChild(save)
+  }
+  if (!TERMINAL.has(t.state) && t.state !== 'saving' && t.state !== 'staged') {
     actions.appendChild(button('取消', act('transferCancel', t.id)))
+  }
+  if (t.state === 'staged') {
+    actions.appendChild(button('放弃', act('transferDelete', t.id)))
   }
   if (TERMINAL.has(t.state)) {
     actions.appendChild(button('删除', act('transferDelete', t.id)))

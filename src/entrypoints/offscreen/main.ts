@@ -2,8 +2,8 @@
  * Offscreen 宿主桥（§3.1）：runtime 消息 ↔ worker。
  *  - SW 发 v2d/offscreen-start / v2d/offscreen-cancel
  *  - worker 事件经 runtime.sendMessage('v2d/task-event') 回 SW 与 popup
- *  - 本地保存：worker 发 v2d/task-staged → 此处读 OPFS 文件建 blob URL →
- *    v2d/task-blob 交 SW 走 chrome.downloads；下载完成后 SW 回发 v2d/dispose-file 清理
+ *  - 本地保存：Chrome = 读 OPFS 建 blob URL 交 SW 走 chrome.downloads；
+ *    Safari = 通知 SW 进入待保存态，管理页按钮以用户手势取 blob URL 触发 <a download>
  */
 
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
@@ -28,7 +28,9 @@ worker.addEventListener('messageerror', () => {
 })
 
 worker.addEventListener('message', (e: MessageEvent) => {
-  const data = e.data as { type?: string; taskId?: string; fileName?: string; state?: string } | undefined
+  const data = e.data as
+    | { type?: string; taskId?: string; fileName?: string; size?: number; state?: string }
+    | undefined
   if (data?.type === 'v2d/task-event' && data.taskId) {
     // 终态任务移出活跃表
     if (data.state === 'done' || data.state === 'failed' || data.state === 'cancelled') {
@@ -37,31 +39,44 @@ worker.addEventListener('message', (e: MessageEvent) => {
   }
   if (data?.type === 'v2d/task-staged' && data.taskId) {
     const taskId: string = data.taskId
-    void (async () => {
-      try {
-        const root = await navigator.storage.getDirectory()
-        const dir = await root.getDirectoryHandle('staging')
-        const fh = await dir.getFileHandle(`${taskId}.part`)
-        const file = await fh.getFile()
-        const blobUrl = URL.createObjectURL(file)
-        blobUrls.set(taskId, blobUrl)
-        await chrome.runtime.sendMessage({
-          type: 'v2d/task-blob',
-          taskId,
-          blobUrl,
-          fileName: data.fileName,
-        })
-      } catch (err) {
-        await chrome.runtime
-          .sendMessage({
-            type: 'v2d/task-event',
+    // 平台分叉：Chrome 有 downloads API → 自动走 SW 保存；Safari 无 downloads →
+    // 通知 SW 进入待保存态，由管理页/弹窗按钮以用户手势触发 <a download>
+    if (import.meta.env.CHROME) {
+      void (async () => {
+        try {
+          const root = await navigator.storage.getDirectory()
+          const dir = await root.getDirectoryHandle('staging')
+          const fh = await dir.getFileHandle(`${taskId}.part`)
+          const file = await fh.getFile()
+          const blobUrl = URL.createObjectURL(file)
+          blobUrls.set(taskId, blobUrl)
+          await chrome.runtime.sendMessage({
+            type: 'v2d/task-blob',
             taskId,
-            state: 'failed',
-            error: `暂存文件读取失败: ${String(err)}`,
+            blobUrl,
+            fileName: data.fileName,
           })
-          .catch(() => {})
-      }
-    })()
+        } catch (err) {
+          await chrome.runtime
+            .sendMessage({
+              type: 'v2d/task-event',
+              taskId,
+              state: 'failed',
+              error: `暂存文件读取失败: ${String(err)}`,
+            })
+            .catch(() => {})
+        }
+      })()
+    } else {
+      void chrome.runtime
+        .sendMessage({
+          type: 'v2d/task-staged-ready',
+          taskId,
+          fileName: data.fileName,
+          size: data.size,
+        })
+        .catch(() => {})
+    }
     return
   }
   void chrome.runtime.sendMessage(data).catch(() => {
@@ -97,6 +112,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
     })()
     sendResponse({ ok: true })
+  } else if (msg?.type === 'getStagedBlob') {
+    // Safari：管理页/弹窗请求待保存产物的 blob URL（可从 OPFS 重建，SW 重启后仍可保存）
+    void (async () => {
+      let url = blobUrls.get(msg.taskId)
+      try {
+        if (!url) {
+          const root = await navigator.storage.getDirectory()
+          const dir = await root.getDirectoryHandle('staging')
+          const fh = await dir.getFileHandle(`${msg.taskId}.part`)
+          const file = await fh.getFile()
+          url = URL.createObjectURL(file)
+          blobUrls.set(msg.taskId, url)
+        }
+        sendResponse({ ok: true, blobUrl: url, fileName: msg.fileName })
+      } catch (err) {
+        sendResponse({ ok: false, error: `暂存文件读取失败: ${String(err)}` })
+      }
+    })()
+    return true
   }
   return false
 })

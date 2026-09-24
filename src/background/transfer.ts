@@ -21,6 +21,7 @@ export type TaskState =
   | 'checking'
   | 'uploading'
   | 'saving'
+  | 'staged'
   | 'paused'
   | 'done'
   | 'failed'
@@ -40,6 +41,9 @@ export interface TransferTask {
   variantUrl?: string
   /** dash：双轨 DASH 描述符（视频轨 + 可选音频轨直链） */
   dashSpec?: DashSpec
+  /** Safari/iOS：合并产物已就绪，等待用户在管理页点「保存到文件」 */
+  stagedFileName?: string
+  stagedSize?: number
   size?: number
   /** downloading：已收字节；offline：percentDone 借用 uploaded 展示 */
   received?: number
@@ -266,11 +270,16 @@ export async function retryTask(taskId: string): Promise<boolean> {
   return true
 }
 
-/** 删除终态任务记录并清理暂存文件 */
+/** 删除任务记录并清理暂存文件（终态；Safari 待保存任务在用户确认后调用） */
 export async function deleteTask(taskId: string): Promise<boolean> {
   const task = (await loadTasks()).find((t) => t.id === taskId)
   if (!task) return false
-  const terminal = task.state === 'done' || task.state === 'failed' || task.state === 'cancelled'
+  const terminal =
+    task.state === 'done' ||
+    task.state === 'failed' ||
+    task.state === 'cancelled' ||
+    // Safari 待保存任务允许放弃（清理暂存产物）
+    task.state === 'staged'
   if (!terminal) return false
   tasks = (await loadTasks()).filter((t) => t.id !== taskId)
   await persist(true)
@@ -303,8 +312,8 @@ export async function recoverStuckTasks(): Promise<void> {
       t.error = '浏览器重启导致保存中断，请重试'
       t.finishedAt = Date.now()
       changed = true
-    } else if (t.state === 'paused') {
-      // 暂停态保持（用户手动继续），但暂存仍在磁盘
+    } else if (t.state === 'paused' || t.state === 'staged') {
+      // 暂停态保持（用户手动继续）；Safari 待保存态保持（产物仍在 OPFS，可重建 blob）
       continue
     } else if (t.state !== 'queued' && t.state !== 'done' && t.state !== 'failed' && t.state !== 'cancelled') {
       t.state = 'queued'
@@ -428,7 +437,7 @@ function releaseWaiter(taskId: string): void {
 async function sendOffscreenStart(payload: unknown): Promise<boolean> {
   for (let attempt = 0; attempt < 10; attempt++) {
     try {
-      await ensureOffscreen()
+      await ensureTransferHost()
       const resp = (await chrome.runtime.sendMessage(payload)) as { ok?: boolean } | undefined
       if (resp?.ok) {
         console.log('[V2D] offscreen 启动成功（第', attempt + 1, '次尝试）')
@@ -447,6 +456,7 @@ async function sendOffscreenStart(payload: unknown): Promise<boolean> {
 async function runUploadTask(task: TransferTask): Promise<void> {
   // 先占 waiter 再发消息：完成/暂停事件可能先于 start 响应到达
   const waiterDone = new Promise<void>((resolve) => uploadWaiters.set(task.id, resolve))
+  await ensureTransferHost()
   // ⚠️ dedicated worker 没有 chrome.* API：token 必须随任务载荷注入
   const tokenData = (await chrome.storage.local.get(TOKEN_STORAGE_KEY))[TOKEN_STORAGE_KEY] as
     | { access_token?: string; refresh_token?: string }
@@ -615,17 +625,52 @@ function waitForDownload(downloadId: number): Promise<void> {
   })
 }
 
-// ── offscreen 生命周期 ─────────────────────────────────────────────────
-export async function ensureOffscreen(): Promise<void> {
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: ['OFFSCREEN_DOCUMENT'],
-  })
-  if (contexts.length === 0) {
-    await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['WORKERS'],
-      justification: 'V2D 传输管线（OPFS 暂存 + 分片直传）',
+// ── Safari/iOS 本地保存：合并产物就绪 → 用户在管理页点「保存到文件」 ──
+export async function applyStagedReady(taskId: string, fileName: string, size: number): Promise<void> {
+  const task = (await loadTasks()).find((t) => t.id === taskId)
+  if (!task) return
+  task.state = 'staged'
+  task.stagedFileName = fileName
+  task.fileName = fileName
+  task.size = size
+  task.received = size
+  task.finishedAt = Date.now()
+  await persist(true)
+}
+
+/** 用户点击保存（<a download> 已触发）后收口 */
+export async function markTaskSaved(taskId: string): Promise<void> {
+  const task = (await loadTasks()).find((t) => t.id === taskId)
+  if (!task || task.state !== 'staged') return
+  task.state = 'done'
+  task.finishedAt = Date.now()
+  await persist(true)
+  try {
+    await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId })
+  } catch {
+    /* ignore */
+  }
+}
+
+// ── 传输宿主（平台抽象，§11）：Chrome=offscreen document；Safari=后台标签页 ──
+export async function ensureTransferHost(): Promise<void> {
+  if (import.meta.env.CHROME) {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
     })
+    if (contexts.length === 0) {
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['WORKERS'],
+        justification: 'V2D 传输管线（OPFS 暂存 + 分片直传）',
+      })
+    }
+    return
+  }
+  // Safari：无 offscreen API，用后台标签页承载同一宿主页面
+  const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL('offscreen.html') })
+  if (tabs.length === 0) {
+    await chrome.tabs.create({ url: chrome.runtime.getURL('offscreen.html'), active: false })
   }
 }
 
@@ -670,35 +715,41 @@ const REFERER_RULES: Array<{ test: RegExp; referer: string }> = [
 ]
 
 async function ensureRefererRuleForTask(task: TransferTask): Promise<void> {
-  const url = task.dashSpec?.video ?? task.variantUrl ?? task.url
-  let host = ''
   try {
-    host = new URL(url).hostname
+    // Safari 的 DNR 支持不完整：不可用时静默跳过（对应 CDN 任务会以 403 失败并提示）
+    if (typeof chrome.declarativeNetRequest === 'undefined') return
+    const url = task.dashSpec?.video ?? task.variantUrl ?? task.url
+    let host = ''
+    try {
+      host = new URL(url).hostname
+    } catch {
+      return
+    }
+    const matched = REFERER_RULES.find((r) => r.test.test(host))
+    if (!matched) {
+      await removeRefererRule().catch(() => {})
+      return
+    }
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [REFERER_RULE_ID],
+      addRules: [
+        {
+          id: REFERER_RULE_ID,
+          priority: 1,
+          condition: {
+            requestDomains: [host.split('.').slice(-2).join('.')],
+            resourceTypes: ['xmlhttprequest'],
+          },
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders: [{ header: 'Referer', operation: 'set', value: matched.referer }],
+          },
+        },
+      ],
+    })
   } catch {
-    return
+    /* DNR 不可用：跳过 */
   }
-  const matched = REFERER_RULES.find((r) => r.test.test(host))
-  if (!matched) {
-    await removeRefererRule().catch(() => {})
-    return
-  }
-  await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [REFERER_RULE_ID],
-    addRules: [
-      {
-        id: REFERER_RULE_ID,
-        priority: 1,
-        condition: {
-          requestDomains: [host.split('.').slice(-2).join('.')],
-          resourceTypes: ['xmlhttprequest'],
-        },
-        action: {
-          type: 'modifyHeaders',
-          requestHeaders: [{ header: 'Referer', operation: 'set', value: matched.referer }],
-        },
-      },
-    ],
-  })
 }
 
 async function removeRefererRule(): Promise<void> {

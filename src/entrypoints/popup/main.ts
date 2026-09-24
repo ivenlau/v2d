@@ -372,6 +372,27 @@ interface TaskView {
   instant?: boolean
 }
 
+/** Safari：用户手势内触发 <a download> 保存合并产物（iOS 下载到「文件」App） */
+async function saveStaged(t: TaskView, btn: HTMLButtonElement): Promise<void> {
+  btn.disabled = true
+  const r = await chrome.runtime.sendMessage({ type: 'getStagedBlob', taskId: t.id })
+  if (!r?.ok) {
+    toast(r?.error ?? '获取文件失败')
+    btn.disabled = false
+    return
+  }
+  const a = document.createElement('a')
+  a.href = r.blobUrl
+  a.download = r.fileName ?? t.fileName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  await new Promise((res) => setTimeout(res, 800))
+  await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
+  btn.disabled = false
+  await renderTasks()
+}
+
 const TASK_STATE_LABEL: Record<string, string> = {
   queued: '排队中',
   'offline-adding': '提交离线任务',
@@ -381,6 +402,7 @@ const TASK_STATE_LABEL: Record<string, string> = {
   checking: '秒传检测中',
   uploading: '上传中',
   saving: '保存本地',
+  staged: '待保存',
 }
 
 function fmtSpeed(bps?: number): string {
@@ -391,6 +413,7 @@ function taskPercent(t: TaskView): number | null {
   if (t.state === 'uploading' && t.size) return Math.min(100, Math.round(((t.uploaded ?? 0) / t.size) * 100))
   if (t.state === 'downloading' && t.size) return Math.min(100, Math.round(((t.received ?? 0) / t.size) * 100))
   if (t.state === 'offline-polling') return Math.min(100, t.uploaded ?? 0)
+  if (t.state === 'saving' || t.state === 'staged') return 100
   return null
 }
 
@@ -434,6 +457,14 @@ async function renderTasks(): Promise<void> {
     if (t.state === 'downloading' && t.kind === 'upload') mini('⏸ 暂停', 'transferPause', '保留断点，稍后继续')
     if (t.state === 'paused') mini('▶ 继续', 'transferResume', '从断点继续')
     if (t.state === 'failed' || t.state === 'cancelled') mini('↻ 重试', 'transferRetry', '重试（保留断点）')
+    if (t.state === 'staged') {
+      const save = document.createElement('button')
+      save.className = 'mini-btn'
+      save.textContent = '⬇ 保存到文件'
+      save.title = '保存到「文件」App'
+      save.addEventListener('click', () => void saveStaged(t, save))
+      actions.appendChild(save)
+    }
     if (actions.children.length) row.appendChild(actions)
     row.querySelector('.task-cancel')?.addEventListener('click', async () => {
       await send({ type: 'transferCancel', taskId: t.id })

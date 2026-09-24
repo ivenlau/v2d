@@ -27,6 +27,7 @@ import type { MediaCandidate, Settings } from '@/core/types'
 import type { BgRequest } from '@/core/messages'
 import { SITE_PROBES } from '@/background/siteProbes'
 import {
+  applyStagedReady,
   applyTaskEvent,
   cancelTask,
   clearFinishedTasks,
@@ -36,6 +37,7 @@ import {
   handleTaskBlob,
   invalidateTaskCache,
   listTasks,
+  markTaskSaved,
   pauseTask,
   recoverStuckTasks,
   resumeTask,
@@ -68,7 +70,9 @@ function markSeen(tabId: number, id: string): boolean {
 
 async function updateBadge(tabId: number, count: number): Promise<void> {
   if (!(await getSettings()).badge) return
-  chrome.action.setBadgeText({ tabId, text: count > 0 ? String(count) : '' })
+  // MV2（Safari 目标）下 action API 挂在 browserAction 命名空间
+  const actionApi = chrome.action ?? (chrome as unknown as { browserAction: typeof chrome.action }).browserAction
+  actionApi.setBadgeText({ tabId, text: count > 0 ? String(count) : '' })
 }
 
 async function resetTab(tabId: number): Promise<void> {
@@ -354,7 +358,10 @@ async function handle(req: BgRequest): Promise<unknown> {
 }
 
 export default defineBackground(() => {
-  chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR })
+  // MV2（Safari 目标）下 action API 挂在 browserAction 命名空间
+  const actionApi = chrome.action ?? (chrome as unknown as { browserAction: typeof chrome.action }).browserAction
+
+  actionApi.setBadgeBackgroundColor({ color: BADGE_COLOR })
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local') {
@@ -445,6 +452,11 @@ export default defineBackground(() => {
     } else if (msg?.type === 'v2d/task-blob') {
       // HLS 本地保存：offscreen 已建好 blob URL，由 SW 发起原生下载并在完成后清理
       void handleTaskBlob(msg.taskId, msg.blobUrl, msg.fileName)
+    } else if (msg?.type === 'v2d/task-staged-ready') {
+      // Safari：合并完成进入待保存态（用户在管理页/弹窗点「保存到文件」）
+      void applyStagedReady(msg.taskId, msg.fileName ?? '', msg.size ?? 0)
+    } else if (msg?.type === 'v2d/task-saved') {
+      void markTaskSaved(msg.taskId)
     } else if (msg?.type === 'v2d/token-updated') {
       // worker 内上传途中轮换的新 token 回传持久化（其余上下文靠三段式恢复自愈）
       void chrome.storage.local.set({

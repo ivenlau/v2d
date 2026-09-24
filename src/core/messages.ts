@@ -17,6 +17,8 @@ export type BgRequest =
   | { type: 'transferRetry'; taskId: string }
   | { type: 'transferDelete'; taskId: string }
   | { type: 'transferClearFinished' }
+  /** Safari：向传输宿主页索取合并产物的 blob URL（用户手势内触发 <a download>） */
+  | { type: 'getStagedBlob'; taskId: string }
   /** 手动彩蛋：粘贴 直链/磁力/ed2k 走 115 离线（§离线已移出自动通道） */
   | { type: 'offlineSubmit'; url: string }
 
