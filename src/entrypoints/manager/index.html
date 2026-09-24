@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>V2D 传输管理</title>
+    <link rel="stylesheet" href="./manager.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <img src="/icons/48.png" class="logo-img" alt="V2D" />
+      <span class="logo">V2D</span>
+      <span class="title">传输管理</span>
+      <button id="clear-finished" class="btn">清除已完成</button>
+    </header>
+
+    <main class="wrap">
+      <!-- ☁ 彩蛋：115 离线（手动提交，已移出自动通道） -->
+      <div id="offline-box" class="offline-box hidden">
+        <span class="offline-title">☁️ 115 离线任务</span>
+        <div class="row">
+          <input id="offline-url" type="text" placeholder="粘贴 直链 / 磁力 / ed2k" />
+          <button id="offline-submit" class="btn primary">提交</button>
+        </div>
+        <div id="offline-msg" class="offline-msg"></div>
+      </div>
+
+      <section>
+        <h2>进行中 <span id="active-count" class="dim"></span></h2>
+        <div id="active-list"></div>
+      </section>
+      <section>
+        <h2>历史 <span id="history-count" class="dim"></span></h2>
+        <div id="history-list"></div>
+      </section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

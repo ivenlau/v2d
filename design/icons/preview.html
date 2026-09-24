@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>V2D 图标方案预览</title>
+<style>
+  :root { --bg:#f1f5f9; --fg:#0f172a; --card:#fff; --line:#e2e8f0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b0f19; --fg:#e2e8f0; --card:#151b28; --line:#243044; } }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font:15px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); padding:32px; }
+  h1 { font-size:20px; margin-bottom:6px; }
+  .tip { color:#64748b; font-size:13px; margin-bottom:28px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:20px; max-width:1200px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .name { font-weight:700; font-size:16px; }
+  .desc { color:#64748b; font-size:13px; margin:4px 0 14px; min-height:38px; }
+  .hero { display:flex; align-items:center; gap:16px; margin-bottom:14px; }
+  .hero img { width:96px; height:96px; border-radius:20px; }
+  .sizes { display:flex; align-items:flex-end; gap:14px; }
+  .sizes img { image-rendering:auto; }
+  .bar { border-radius:8px; padding:8px 12px; display:flex; align-items:center; gap:10px; margin-top:12px; }
+  .bar.light { background:#f8fafc; border:1px solid #e2e8f0; }
+  .bar.dark  { background:#202124; }
+  .bar .addr { flex:1; background:rgba(127,127,127,.15); border-radius:14px; font-size:12px; padding:3px 12px; color:#94a3b8; }
+  .bar img { display:block; }
+  .pick { margin-top:12px; font-size:12.5px; color:#64748b; }
+</style>
+</head>
+<body>
+<h1>V2D 图标方案预览</h1>
+<p class="tip">每张含：96px 大图 ｜ 工具栏真实尺寸 16/32px（浅色 &amp; 深色工具栏）｜ 48px。挑好后把方案名发我即可，可附加修改意见（配色/元素微调）。</p>
+<div class="grid" id="grid"></div>
+<script>
+const items = [
+  { id:'v2d-flow', name:'① V→D 字母流', desc:'直白点题 Video to Disk：V 经箭头流向 D。识别度最高，信息最完整。' },
+  { id:'play-down', name:'② 播放 + 下载徽章', desc:'「正在播放的视频」+ 右下角绿色下载角标，插件功能一目了然。' },
+  { id:'disk-cloud', name:'③ 硬盘 + 云', desc:'本地落盘 + 云端转存双关，青色云暗指 115。深底方案，工具栏上更沉稳。' },
+  { id:'tray', name:'④ 落入托盘', desc:'经典下载意象：箭头落入托盘 = 存下来。极简，16px 也清晰。' },
+  { id:'film-strip', name:'⑤ 胶片 + 播放', desc:'媒体属性最强：胶片带 + 播放键。与「下载/网盘」的关联稍弱。' },
+  { id:'v-arrow', name:'⑥ V 落盘（绿）', desc:'V 字本身化作向下落盘的箭头，一形双义；提供一套绿色配色供换口味。' },
+]
+const grid = document.getElementById('grid')
+for (const it of items) {
+  const card = document.createElement('div')
+  card.className = 'card'
+  card.innerHTML = `
+    <div class="name">${it.name}</div>
+    <div class="desc">${it.desc}</div>
+    <div class="hero"><img src="${it.id}/128.png"><img src="${it.id}/48.png" style="width:48px;height:48px;border-radius:11px"></div>
+    <div class="bar light">
+      <img src="${it.id}/16.png" title="16px">
+      <img src="${it.id}/32.png" title="32px">
+      <span class="addr">地址栏：example.com/video</span>
+      <img src="${it.id}/16.png">
+    </div>
+    <div class="bar dark">
+      <img src="${it.id}/16.png">
+      <img src="${it.id}/32.png">
+      <span class="addr">深色工具栏下的效果</span>
+      <img src="${it.id}/16.png">
+    </div>
+    <div class="pick">方案名：${it.id}</div>
+  `
+  grid.appendChild(card)
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>V2D 设置</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <h1><img src="/icons/128.png" class="logo-img" alt="V2D" /> <span class="logo">V2D</span> 设置</h1>
+
+      <section>
+        <h2>通用</h2>
+        <label class="row">
+          <input type="checkbox" id="badge" />
+          <span>发现视频时在图标上显示角标数字</span>
+        </label>
+        <label class="col">
+          <span class="label-text">嗅探黑名单（每行一个域名，如 <code>example.com</code>，含子域名）</span>
+          <textarea id="blacklist" rows="4" placeholder="example.com"></textarea>
+        </label>
+      </section>
+
+      <section id="v115-section">
+        <h2 class="h2-flex">
+          <span>115 网盘转存</span>
+          <span id="v115-state" class="state-chip hidden"></span>
+        </h2>
+        <label class="row">
+          <input type="checkbox" id="v115-enabled" />
+          <span>启用 115 转存</span>
+        </label>
+
+        <!-- 认证引导（§9.5：首次开启即进入；仅扫码） -->
+        <div id="v115-auth" class="card hidden">
+          <p class="dim">使用 115 App 扫描二维码，并在手机上确认授权</p>
+          <div class="qr-box">
+            <img id="qr-img" class="qr hidden" alt="115 授权二维码" />
+            <div id="qr-status" class="dim">点击「生成二维码」开始（2 分钟内有效）</div>
+          </div>
+          <button id="qr-start" class="btn">生成二维码</button>
+        </div>
+
+        <!-- 认证后：账号 / 目录 / 通道说明 -->
+        <div id="v115-active" class="card hidden">
+          <p id="v115-space" class="dim"></p>
+
+          <h3>默认保存目录</h3>
+          <p class="dim">
+            已保存：<code id="dir-saved">默认规则</code>
+            <span class="dim">（默认规则 = <code>/来自浏览器/{站点}/{年-月}/</code>，转存时自动创建）</span>
+          </p>
+          <div class="dir-browser">
+            <div id="dir-breadcrumbs" class="crumbs"></div>
+            <div id="dir-list" class="dir-list"></div>
+            <div class="row">
+              <input id="dir-newname" type="text" placeholder="新建文件夹名称" />
+              <button id="dir-create" class="btn">新建</button>
+            </div>
+            <div class="row">
+              <button id="dir-select" class="btn primary">选定当前浏览的目录</button>
+              <button id="dir-reset" class="btn">恢复默认规则</button>
+            </div>
+          </div>
+
+          <h3>转存通道</h3>
+          <p class="dim">
+            自动转存一律走「浏览器直传」：<b>秒传优先</b>（SHA1 命中零上传），未命中再 OSS 分片直传。
+          </p>
+          <p class="dim">
+            🥚 彩蛋：115 离线下载已改为手动入口，在「传输管理」页粘贴 直链 / 磁力 / ed2k 提交（115 会员功能）。
+          </p>
+
+          <div class="row">
+            <button id="v115-logout" class="btn danger">退出 115 登录</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>关于</h2>
+        <p class="dim">嗅探页面视频，一键下载到本地，或转存到 115 网盘。仅处理无 DRM 保护的内容。</p>
+      </section>
+    </main>
+
+    <div id="saved" class="saved-toast"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

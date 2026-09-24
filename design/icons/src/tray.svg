@@ -1,0 +1,15 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#3730a3"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="url(#bg)"/>
+  <!-- 下载箭头 -->
+  <path d="M256 104 v178" stroke="#ffffff" stroke-width="48" stroke-linecap="round"/>
+  <path d="M180 268 L256 350 L332 268" fill="none" stroke="#ffffff" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 托盘（落盘） -->
+  <path d="M140 342 h232 a26 26 0 0 1 26 26 v44 a26 26 0 0 1 -26 26 h-232 a26 26 0 0 1 -26 -26 v-44 a26 26 0 0 1 26 -26 z" fill="#a5b4fc"/>
+  <path d="M140 372 v-30 h232 v30" fill="none" stroke="#818cf8" stroke-width="14"/>
+</svg>
