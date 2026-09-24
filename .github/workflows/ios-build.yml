@@ -35,14 +35,20 @@ jobs:
             --bundle-identifier "com.ivenlau.v2d" \
             --ios-only \
             --no-open --no-prompt
+          echo "── 转换产物 ──"
+          find .output/ios -maxdepth 3 | head -20
 
       - name: 编译（未签名）
         run: |
-          cd .output/ios
-          xcodebuild -list -project V2D.xcodeproj
-          SCHEME=$(xcodebuild -list -project V2D.xcodeproj | awk '/Targets:/{f=1;next} f&&NF{print;exit}')
+          PROJ=$(find .output/ios -name "*.xcodeproj" -maxdepth 3 | head -1)
+          echo "project: $PROJ"
+          PROJ_NAME=$(basename "$PROJ")
+          PROJ_DIR=$(dirname "$PROJ")
+          cd "$PROJ_DIR"
+          xcodebuild -list -project "$PROJ_NAME"
+          SCHEME=$(xcodebuild -list -project "$PROJ_NAME" | awk '/Schemes:/{f=1;next} f&&NF{print;exit}' | head -1)
           echo "scheme: $SCHEME"
-          xcodebuild -project V2D.xcodeproj \
+          xcodebuild -project "$PROJ_NAME" \
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
@@ -52,7 +58,7 @@ jobs:
 
       - name: 打包 IPA
         run: |
-          APP=$(find .output/ios/build/Build/Products -name "*.app" -maxdepth 4 | head -1)
+          APP=$(find .output/ios -name "*.app" -path "*Release-iphoneos*" | head -1)
           echo "app: $APP"
           mkdir -p Payload
           cp -r "$APP" Payload/
