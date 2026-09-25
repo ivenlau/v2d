@@ -253,8 +253,12 @@ async function handle(req: BgRequest): Promise<unknown> {
     case 'download': {
       const cand = await getCandidate(req.tabId, req.id)
       if (!cand) return { error: 'candidate not found' }
-      // HLS/DASH 走合并队列
-      if (cand.kind === 'hls' || cand.kind === 'dash') {
+      // HLS/DASH 走合并队列；Safari/iOS 无 chrome.downloads，直链本地保存也走队列
+      //（worker 下载→OPFS→待保存→用户手势保存）
+      if (cand.kind === 'hls' || cand.kind === 'dash' || !import.meta.env.CHROME) {
+        if (cand.kind === 'blob') {
+          return { ok: false, reason: '页面内嵌流（blob:）暂不支持' }
+        }
         const settings = await loadSettings()
         const task = await enqueueTransfer(cand, settings.v115, req.pageTitle, {
           dest: 'local',

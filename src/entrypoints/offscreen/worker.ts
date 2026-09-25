@@ -28,7 +28,7 @@ export interface WorkerTask {
   id: string
   /** direct = 直链单文件；hls = m3u8 分段合并；dash = 双轨 DASH 合并（M5） */
   kind: 'direct' | 'hls' | 'dash'
-  /** cloud = 转存 115；local = 保存本地（hls/dash 走队列） */
+  /** cloud = 转存 115；local = 保存本地（Safari 直链/HLS/DASH 走队列） */
   dest: 'cloud' | 'local'
   url: string
   fileName: string
@@ -126,9 +126,10 @@ async function runDirectTask(
   let downloadDone = false // 离开下载阶段后暂停视为取消
 
   try {
-    const client = getClientFor(task)
+    const isCloud = task.dest === 'cloud'
+    const client = isCloud ? getClientFor(task) : null
     emit({ state: 'downloading' })
-    const cid = await client.createDirRecursive(task.targetPath)
+    const cid = isCloud ? await client!.createDirRecursive(task.targetPath) : 0
 
     stage = await OpfsStage.open(task.id)
     let offset = stage.size
@@ -212,11 +213,19 @@ async function runDirectTask(
     downloadDone = true
     emit({ state: 'hashing', received, size: received })
 
+    // 直链本地保存（iOS/Safari）：产物就绪，进入待保存态（用户手势触发下载）
+    if (task.dest !== 'cloud') {
+      await stage.close()
+      stage = null
+      ctx.postMessage({ type: 'v2d/task-staged', taskId: task.id, fileName: task.fileName, size: received })
+      return
+    }
+
     // 秒传优先：upload/init 命中即零上传完成，未命中才走 OSS 直传
     emit({ state: 'checking', size: received })
     emit({ state: 'uploading', uploaded: 0, size: received })
     let lastUp = 0
-    const res = await fastUpload115(client, {
+    const res = await fastUpload115(client!, {
       fileName: task.fileName,
       size: received,
       cid,
