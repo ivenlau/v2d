@@ -40,8 +40,8 @@ jobs:
 
       - name: 注入自定义 Swift/Entitlements
         run: |
-          CV=$(find .output/ios -name "ContentView.swift" | head -1)
-          [ -n "$CV" ] && cp ios/ContentView.swift "$CV" && echo "Injected: $CV"
+          VC=$(find .output/ios -name "ViewController.swift" | head -1)
+          [ -n "$VC" ] && cp ios/ViewController.swift "$VC" && echo "Injected: $VC"
           HANDLER=$(find .output/ios -name "SafariWebExtensionHandler.swift" | head -1)
           [ -n "$HANDLER" ] && cp ios/SafariWebExtensionHandler.swift "$HANDLER" && echo "Injected: $HANDLER"
           cp ios/V2D.entitlements .output/ios/V2D.entitlements
