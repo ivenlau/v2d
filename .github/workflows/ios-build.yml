@@ -64,7 +64,6 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS=V2D/V2D.entitlements \
             build
 
       - name: 打包 IPA
