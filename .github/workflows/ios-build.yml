@@ -24,12 +24,12 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 构建 Safari 扩展（MV2）
-        run: pnpm exec wxt build -b safari
+      - name: 构建 Safari 扩展（MV3）
+        run: pnpm exec wxt build -b safari --mv3
 
       - name: 转换为 Xcode 工程
         run: |
-          xcrun safari-web-extension-converter .output/safari-mv2 \
+          xcrun safari-web-extension-converter .output/safari-mv3 \
             --project-location .output/ios \
             --app-name "V2D" \
             --bundle-identifier "com.ivenlau.v2d" \

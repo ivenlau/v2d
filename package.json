@@ -8,7 +8,7 @@
     "dev": "wxt",
     "build": "wxt build",
     "postinstall": "wxt prepare",
-    "build:safari": "wxt build -b safari",
+    "build:safari": "wxt build -b safari --mv3",
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
     "test": "vitest run",
