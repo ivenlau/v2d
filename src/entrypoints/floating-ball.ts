@@ -86,25 +86,29 @@ export default defineUnlistedScript(() => {
     ball.style.top = `${y}px`
   }
 
-  // ── 拖动 + 点击判定（位移阈值 4px） ──
+  // ── 拖动 + 点击判定（相对按下点的累计位移超 4px 即视为拖动，不触发面板） ──
   let dragging = false
   let moved = false
-  let sx = 0
-  let sy = 0
+  let downX = 0
+  let downY = 0
+  let lastX = 0
+  let lastY = 0
   ball.addEventListener('pointerdown', (e) => {
     dragging = true
     moved = false
-    sx = e.clientX
-    sy = e.clientY
+    downX = e.clientX
+    downY = e.clientY
+    lastX = e.clientX
+    lastY = e.clientY
     ball.setPointerCapture(e.pointerId)
   })
   ball.addEventListener('pointermove', (e) => {
     if (!dragging) return
-    x += e.clientX - sx
-    y += e.clientY - sy
-    sx = e.clientX
-    sy = e.clientY
-    moved = moved || Math.abs(e.clientX - sx) > 2 || Math.abs(e.clientY - sy) > 2
+    x += e.clientX - lastX
+    y += e.clientY - lastY
+    lastX = e.clientX
+    lastY = e.clientY
+    if (Math.abs(e.clientX - downX) > 4 || Math.abs(e.clientY - downY) > 4) moved = true
     applyPos()
   })
   ball.addEventListener('pointerup', () => {

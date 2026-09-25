@@ -29,6 +29,11 @@ async function initGeneric(): Promise<void> {
   input('#floating-ball').checked = settings.floatingBall
   area('#blacklist').value = settings.blacklist.join('\n')
 
+  // 悬浮球仅桌面 Chrome 支持（iOS 注入会破坏页面）
+  if (!import.meta.env.CHROME) {
+    $('#row-floating-ball')?.classList.add('hidden')
+  }
+
   input('#badge').addEventListener('change', async () => {
     await saveSettings({ badge: input('#badge').checked })
     flashSaved()

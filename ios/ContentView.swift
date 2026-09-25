@@ -41,17 +41,46 @@ private let STATE_LABELS: [String: String] = [
     "cancelled": "已取消",
 ]
 
+/// ⚠️ 与 SafariWebExtensionHandler 侧保持同一解析逻辑（两侧进程各自解析到同一组名）
+private func resolveAppGroup() -> String {
+    let fallback = "group.com.ivenlau.v2d"
+    var candidates: [String] = []
+    if let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+       let raw = try? Data(contentsOf: url),
+       let text = String(data: raw, encoding: .utf8) {
+        if let r = text.range(of: "com\\.apple\\.security\\.application-groups[\\s\\S]*?</array>", options: .regularExpression) {
+            let seg = String(text[r])
+            if let g = seg.range(of: "group\\.[A-Za-z0-9.\\-]+", options: .regularExpression) {
+                candidates.append(String(seg[g]))
+            }
+        }
+        if let r = text.range(of: "<key>application-identifier</key>\\s*<string>[A-Z0-9]{10}\\.", options: .regularExpression) {
+            let team = String(text[r]).split(separator: ".").last ?? ""
+            if !team.isEmpty {
+                candidates.append("group.\(team).com.rileytestut.AltStore")
+                candidates.append("group.\(team).com.SideStore.SideStore")
+            }
+        }
+    }
+    candidates.append(fallback)
+    for c in candidates {
+        if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: c) != nil {
+            return c
+        }
+    }
+    return fallback
+}
+
 struct ContentView: View {
     @State private var tasks: [AppTask] = []
-    @State private var syncedAt = ""
 
-    private let suiteName = "group.com.ivenlau.v2d"
+    private var suite: String { resolveAppGroup() }
 
     var body: some View {
         NavigationView {
             List {
                 Section("进行中") {
-                    let act = tasks.filter { !["done", "failed", "cancelled"].contains($0.state) }
+                    let act = tasks.filter { !["done", "failed", "cancelled", "staged"].contains($0.state) }
                     if act.isEmpty {
                         Text("暂无进行中的任务").foregroundColor(.secondary)
                     }
@@ -104,6 +133,17 @@ struct ContentView: View {
         .padding(.vertical, 2)
     }
 
+    private func load(): Void {
+        let defaults = UserDefaults(suiteName: resolveAppGroup())
+        guard let arr = defaults?.array(forKey: "transfer.tasks") as? [[String: Any]] else {
+            tasks = []
+            return
+        }
+        tasks = arr
+            .sorted { ($0["createdAt"] as? Double ?? 0) > ($1["createdAt"] as? Double ?? 0) }
+            .map(AppTask.init(dict:))
+    }
+
     private func chipColor(_ state: String) -> Color {
         switch state {
         case "done": return .green
@@ -112,17 +152,5 @@ struct ContentView: View {
         case "paused": return .orange
         default: return .indigo
         }
-    }
-
-    private func load(): Void {
-        let defaults = UserDefaults(suiteName: suiteName)
-        guard let arr = defaults?.array(forKey: "transfer.tasks") as? [[String: Any]] else {
-            tasks = []
-            return
-        }
-        tasks = arr
-            .sorted { ($0["createdAt"] as? Double ?? 0) > ($1["createdAt"] as? Double ?? 0) }
-            .map(AppTask.init(dict:))
-        syncedAt = ""
     }
 }
