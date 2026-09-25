@@ -97,6 +97,7 @@ function button(label: string, onClick: () => void, primary = false): HTMLButton
 function renderTask(t: TaskView): HTMLElement {
   const el = document.createElement('div')
   el.className = 'task'
+  el.dataset.taskId = t.id
   const cls = TERMINAL.has(t.state)
     ? t.state === 'done'
       ? 'done'
@@ -153,7 +154,7 @@ function renderTask(t: TaskView): HTMLElement {
   return el
 }
 
-/** Safari：读 OPFS 待保存产物并触发下载，完成后收口 */
+/** Safari：读 OPFS 待保存产物并触发下载（必须由用户点击手势调用） */
 async function saveStagedById(taskId: string): Promise<void> {
   const t = lastTasks.find((x) => x.id === taskId)
   const name = t?.stagedFileName ?? t?.fileName ?? 'video.mp4'
@@ -244,12 +245,13 @@ chrome.runtime.onMessage.addListener((msg) => {
   return false
 })
 
-// 从 popup「保存到文件」跳转而来：自动触发对应任务的保存
+// 从 popup「保存到文件」跳转而来：定位并高亮任务（保存仍需用户点击——iOS 拦截无手势下载）
 const saveParam = new URLSearchParams(location.search).get('save')
 if (saveParam) {
   void (async () => {
     await refresh()
-    await saveStagedById(saveParam).catch((e) => alert(`保存失败: ${String(e)}`))
+    document.querySelector(`[data-task-id="${saveParam}"]`)?.scrollIntoView({ block: 'center' })
+    document.querySelector(`[data-task-id="${saveParam}"] .actions`)?.classList.add('flash')
   })()
 }
 

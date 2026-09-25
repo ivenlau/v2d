@@ -96,6 +96,11 @@ h2 { font-size: 15px; margin: 18px 0 10px; padding-bottom: 6px; border-bottom: 1
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .empty { color: var(--dim); text-align: center; padding: 24px 0; }
 .instant { color: var(--ok); font-size: 12px; }
+.actions.flash { animation: flash 1.2s ease 2; }
+@keyframes flash {
+  0%, 100% { background: transparent; }
+  50% { background: var(--accent-soft); }
+}
 
 .offline-box {
   border: 1px dashed var(--line);
