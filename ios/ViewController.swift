@@ -178,8 +178,8 @@ struct TaskListView: View {
         }
     }
 
-    private func load(): Void {
-        let defaults = UserDefaults(suiteName: resolveAppGroup())
+    private func load() {
+        let defaults = UserDefaults(suiteName: AppGroup.resolve())
         guard let arr = defaults?.array(forKey: "transfer.tasks") as? [[String: Any]] else {
             tasks = []
             return
