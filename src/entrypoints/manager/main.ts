@@ -14,6 +14,7 @@ interface TaskView {
   dest: 'cloud' | 'local'
   state: string
   fileName: string
+  stagedFileName?: string
   targetPath: string
   size?: number
   received?: number
@@ -138,21 +139,31 @@ function renderTask(t: TaskView): HTMLElement {
     save.textContent = '⬇ 保存到文件'
     save.addEventListener('click', async () => {
       save.disabled = true
-      const r = await send<{ ok: boolean; blobUrl?: string; fileName?: string; error?: string }>({
-        type: 'getStagedBlob',
-        taskId: t.id,
-      })
-      if (r?.ok && r.blobUrl) {
+      try {
+        // 直接读 OPFS（不经宿主页面，iOS 后台标签页可能被丢弃）
+        const root = await navigator.storage.getDirectory()
+        const dir = await root.getDirectoryHandle('staging')
+        const fh = await dir.getFileHandle(`${t.id}.part`)
+        const file = await fh.getFile()
+        if (file.size === 0) throw new Error('暂存文件为空')
+        const url = URL.createObjectURL(file)
         const a = document.createElement('a')
-        a.href = r.blobUrl
-        a.download = r.fileName ?? t.fileName
+        a.href = url
+        a.download = t.stagedFileName ?? t.fileName
         document.body.appendChild(a)
         a.click()
         a.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 30_000)
+        try {
+          await dir.removeEntry(`${t.id}.part`)
+        } catch {
+          /* ignore */
+        }
         await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
         await refresh()
-      } else {
+      } catch (e) {
         save.disabled = false
+        alert(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
       }
     })
     actions.appendChild(save)

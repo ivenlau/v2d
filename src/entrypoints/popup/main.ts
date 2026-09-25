@@ -374,6 +374,7 @@ interface TaskView {
   dest: 'cloud' | 'local'
   state: string
   fileName: string
+  stagedFileName?: string
   size?: number
   received?: number
   uploaded?: number
@@ -384,25 +385,30 @@ interface TaskView {
   instant?: boolean
 }
 
-/** Safari：用户手势内触发 <a download> 保存合并产物（iOS 下载到「文件」App） */
+/** Safari：直接读 OPFS 产物生成下载（不经宿主页面——iOS 会丢弃后台标签页导致链路断裂） */
 async function saveStaged(t: TaskView, btn: HTMLButtonElement): Promise<void> {
   btn.disabled = true
-  const r = await chrome.runtime.sendMessage({ type: 'getStagedBlob', taskId: t.id })
-  if (!r?.ok) {
-    toast(r?.error ?? '获取文件失败')
+  try {
+    const root = await navigator.storage.getDirectory()
+    const dir = await root.getDirectoryHandle('staging')
+    const fh = await dir.getFileHandle(`${t.id}.part`)
+    const file = await fh.getFile()
+    if (file.size === 0) throw new Error('暂存文件为空')
+    const url = URL.createObjectURL(file)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = t.stagedFileName ?? t.fileName
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 30_000)
+    await new Promise((res) => setTimeout(res, 800))
+    await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
+    await renderTasks()
+  } catch (e) {
+    toast(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
     btn.disabled = false
-    return
   }
-  const a = document.createElement('a')
-  a.href = r.blobUrl
-  a.download = r.fileName ?? t.fileName
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  await new Promise((res) => setTimeout(res, 800))
-  await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
-  btn.disabled = false
-  await renderTasks()
 }
 
 const TASK_STATE_LABEL: Record<string, string> = {

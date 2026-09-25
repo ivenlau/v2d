@@ -95,6 +95,12 @@ export class OpfsStage {
   /** 只关句柄、保留文件（本地保存路径：文件还要经 blob URL 交给 downloads） */
   async close(): Promise<void> {
     try {
+      // iOS Safari：close 前不 flush 可能导致 getFile() 读到空文件
+      this.handle?.flush()
+    } catch {
+      /* ignore */
+    }
+    try {
       this.handle?.close()
     } catch {
       /* ignore */
