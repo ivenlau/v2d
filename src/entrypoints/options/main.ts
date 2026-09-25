@@ -42,6 +42,8 @@ async function initGeneric(): Promise<void> {
     await saveSettings({ floatingBall: input('#floating-ball').checked })
     flashSaved()
   })
+  // 悬浮球桌面/移动端均已支持，不再按平台隐藏该设置项
+  void $('#row-floating-ball')
   // change 事件在失焦时触发，避免每敲一个字符写一次 storage
   area('#blacklist').addEventListener('change', async () => {
     const blacklist = area('#blacklist').value
@@ -63,11 +65,15 @@ async function init115(): Promise<void> {
 input('#v115-enabled').addEventListener('change', async () => {
   const settings = await loadSettings()
   if (input('#v115-enabled').checked) {
-    let granted = false
-    try {
-      granted = await chrome.permissions.request({ origins: V115_ORIGINS })
-    } catch {
-      granted = false
+    // Chrome：动态申请 115 host 权限；Safari（iOS）无 permissions API——
+    // 站点访问由 Safari 原生设置管理，直接放行走授权流程（历史 bug：异常被当拒绝，开关永远打不开）
+    let granted = true
+    if (typeof chrome.permissions !== 'undefined' && chrome.permissions.request) {
+      try {
+        granted = await chrome.permissions.request({ origins: V115_ORIGINS })
+      } catch {
+        granted = false
+      }
     }
     if (!granted) {
       input('#v115-enabled').checked = false
@@ -76,8 +82,7 @@ input('#v115-enabled').addEventListener('change', async () => {
     await saveSettings({ v115: { ...settings.v115, enabled: true } })
     await showActiveOrAuth()
   } else {
-    // ⚠️ permissions.remove 在未授予状态下会 reject，必须兜住，
-    // 否则异常中断导致 enabled 永远关不掉（历史 bug）
+    // permissions.remove 在未授予状态下会 reject，必须兜住（历史 bug）
     try {
       await chrome.permissions.remove({ origins: V115_ORIGINS })
     } catch {

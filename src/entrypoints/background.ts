@@ -474,11 +474,10 @@ export default defineBackground(() => {
   // SW 冷启动：恢复被杀期间卡住的任务并继续泵
   void recoverStuckTasks().catch((e) => console.warn('[V2D] 任务恢复失败', e))
 
-  // 悬浮球（默认关闭，仅桌面 Chrome；iOS 注入会破坏页面布局）：按设置注入（脚本自防重复注入）
+  // 悬浮球（默认关闭；脚本自防重复注入，iOS 已做 body 挂载与视口自适应加固）
   chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
     if (info.status !== 'complete' || !tab.url) return
     try {
-      if (!import.meta.env.CHROME) return
       if (!/^(https?|file):/.test(tab.url)) return
       const { floatingBall, blacklist } = await getSettings()
       if (!floatingBall) return

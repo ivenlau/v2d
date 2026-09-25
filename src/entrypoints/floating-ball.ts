@@ -10,6 +10,8 @@ export default defineUnlistedScript(() => {
   }
   if ((window as unknown as BallWindow).__v2dFloatingBall) return
   ;(window as unknown as BallWindow).__v2dFloatingBall = true
+  // iOS 加固：body 未就绪不注入（避免挂到 <html> 破坏布局）
+  if (!document.body) return
 
   const BALL_SIZE = 44
   const PANEL_W = 392
@@ -46,9 +48,7 @@ export default defineUnlistedScript(() => {
     .panel-wrap {
       position: fixed;
       z-index: 2147483647;
-      width: ${PANEL_W}px;
-      height: ${PANEL_H}px;
-      max-height: 82vh;
+      height: min(${PANEL_H}px, 82vh);
       border-radius: 12px;
       overflow: hidden;
       box-shadow: 0 10px 40px rgba(0,0,0,.4);
@@ -124,9 +124,15 @@ export default defineUnlistedScript(() => {
   function togglePanel(): void {
     panelOpen = !panelOpen
     if (panelOpen) {
-      clamp()
-      wrap.style.left = `${Math.max(8, x - PANEL_W + BALL_SIZE + 16)}px`
-      wrap.style.top = `${Math.max(8, Math.min(y, window.innerHeight - PANEL_H - 8))}px`
+      // 面板宽度自适应视口（iOS 窄屏），位置居中于球并夹紧在视口内
+      const w = Math.min(PANEL_W, window.innerWidth - 16)
+      const h = Math.min(PANEL_H, Math.round(window.innerHeight * 0.82))
+      wrap.style.width = `${w}px`
+      wrap.style.height = `${h}px`
+      const left = x + BALL_SIZE / 2 - w / 2
+      wrap.style.left = `${Math.max(8, Math.min(left, window.innerWidth - w - 8))}px`
+      const top = y + BALL_SIZE / 2 - h / 2
+      wrap.style.top = `${Math.max(8, Math.min(top, window.innerHeight - h - 8))}px`
       wrap.classList.add('open')
     } else {
       wrap.classList.remove('open')
