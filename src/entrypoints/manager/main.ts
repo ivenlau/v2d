@@ -137,35 +137,7 @@ function renderTask(t: TaskView): HTMLElement {
     const save = document.createElement('button')
     save.className = 'btn primary'
     save.textContent = '⬇ 保存到文件'
-    save.addEventListener('click', async () => {
-      save.disabled = true
-      try {
-        // 直接读 OPFS（不经宿主页面，iOS 后台标签页可能被丢弃）
-        const root = await navigator.storage.getDirectory()
-        const dir = await root.getDirectoryHandle('staging')
-        const fh = await dir.getFileHandle(`${t.id}.part`)
-        const file = await fh.getFile()
-        if (file.size === 0) throw new Error('暂存文件为空')
-        const url = URL.createObjectURL(file)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = t.stagedFileName ?? t.fileName
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        setTimeout(() => URL.revokeObjectURL(url), 30_000)
-        try {
-          await dir.removeEntry(`${t.id}.part`)
-        } catch {
-          /* ignore */
-        }
-        await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
-        await refresh()
-      } catch (e) {
-        save.disabled = false
-        alert(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
-      }
-    })
+    save.addEventListener('click', () => void saveStagedById(t.id))
     actions.appendChild(save)
   }
   if (!TERMINAL.has(t.state) && t.state !== 'saving' && t.state !== 'staged') {
@@ -181,9 +153,38 @@ function renderTask(t: TaskView): HTMLElement {
   return el
 }
 
+/** Safari：读 OPFS 待保存产物并触发下载，完成后收口 */
+async function saveStagedById(taskId: string): Promise<void> {
+  const t = lastTasks.find((x) => x.id === taskId)
+  const name = t?.stagedFileName ?? t?.fileName ?? 'video.mp4'
+  const root = await navigator.storage.getDirectory()
+  const dir = await root.getDirectoryHandle('staging')
+  const fh = await dir.getFileHandle(`${taskId}.part`)
+  const file = await fh.getFile()
+  if (file.size === 0) throw new Error('暂存文件为空')
+  const url = URL.createObjectURL(file)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  try {
+    await dir.removeEntry(`${taskId}.part`)
+  } catch {
+    /* ignore */
+  }
+  await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId })
+  await refresh()
+}
+
+let lastTasks: TaskView[] = []
+
 async function refresh(): Promise<void> {
   const r = await send<{ tasks: TaskView[] }>({ type: 'transferList' })
-  const tasks = [...(r?.tasks ?? [])].sort((a, b) => b.createdAt - a.createdAt)
+  lastTasks = [...(r?.tasks ?? [])].sort((a, b) => b.createdAt - a.createdAt)
+  const tasks = lastTasks
   const active = tasks.filter((t) => !TERMINAL.has(t.state))
   const history = tasks.filter((t) => TERMINAL.has(t.state))
 
@@ -242,6 +243,15 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'v2d/task-event' || msg?.type === 'v2d/task-blob') void refresh()
   return false
 })
+
+// 从 popup「保存到文件」跳转而来：自动触发对应任务的保存
+const saveParam = new URLSearchParams(location.search).get('save')
+if (saveParam) {
+  void (async () => {
+    await refresh()
+    await saveStagedById(saveParam).catch((e) => alert(`保存失败: ${String(e)}`))
+  })()
+}
 
 void initOfflineBox()
 void refresh()

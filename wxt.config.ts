@@ -6,7 +6,7 @@ import { defineConfig } from 'wxt'
 export default defineConfig({
   srcDir: 'src',
   manifest: {
-    name: 'V2D - 视频嗅探转存',
+    name: 'V2D',
     description: '嗅探页面视频，一键下载到本地，或转存到 115 网盘',
     permissions: [
       'storage',

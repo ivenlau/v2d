@@ -61,7 +61,7 @@ input('#v115-enabled').addEventListener('change', async () => {
     // Chrome：动态申请 115 host 权限；Safari（iOS）无 permissions API——
     // 站点访问由 Safari 原生设置管理，直接放行走授权流程（历史 bug：异常被当拒绝，开关永远打不开）
     let granted = true
-    if (typeof chrome.permissions !== 'undefined' && chrome.permissions.request) {
+    if (import.meta.env.CHROME) {
       try {
         granted = await chrome.permissions.request({ origins: V115_ORIGINS })
       } catch {

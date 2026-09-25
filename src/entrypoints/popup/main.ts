@@ -476,11 +476,14 @@ async function renderTasks(): Promise<void> {
     if (t.state === 'paused') mini('▶ 继续', 'transferResume', '从断点继续')
     if (t.state === 'failed' || t.state === 'cancelled') mini('↻ 重试', 'transferRetry', '重试（保留断点）')
     if (t.state === 'staged') {
+      // iOS：popup 内 blob 下载不可靠 → 跳转传输管理页自动保存
       const save = document.createElement('button')
       save.className = 'mini-btn'
       save.textContent = '⬇ 保存到文件'
-      save.title = '保存到「文件」App'
-      save.addEventListener('click', () => void saveStaged(t, save))
+      save.title = '在传输管理页保存到「文件」App'
+      save.addEventListener('click', () => {
+        void chrome.tabs.create({ url: chrome.runtime.getURL(`manager.html?save=${t.id}`) })
+      })
       actions.appendChild(save)
     }
     if (actions.children.length) row.appendChild(actions)
