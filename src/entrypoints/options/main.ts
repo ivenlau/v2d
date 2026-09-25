@@ -29,11 +29,6 @@ async function initGeneric(): Promise<void> {
   input('#floating-ball').checked = settings.floatingBall
   area('#blacklist').value = settings.blacklist.join('\n')
 
-  // 悬浮球仅桌面 Chrome 支持（iOS 注入会破坏页面）
-  if (!import.meta.env.CHROME) {
-    $('#row-floating-ball')?.classList.add('hidden')
-  }
-
   input('#badge').addEventListener('change', async () => {
     await saveSettings({ badge: input('#badge').checked })
     flashSaved()
@@ -42,8 +37,6 @@ async function initGeneric(): Promise<void> {
     await saveSettings({ floatingBall: input('#floating-ball').checked })
     flashSaved()
   })
-  // 悬浮球桌面/移动端均已支持，不再按平台隐藏该设置项
-  void $('#row-floating-ball')
   // change 事件在失焦时触发，避免每敲一个字符写一次 storage
   area('#blacklist').addEventListener('change', async () => {
     const blacklist = area('#blacklist').value
