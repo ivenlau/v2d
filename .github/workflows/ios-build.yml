@@ -44,7 +44,6 @@ jobs:
           [ -n "$VC" ] && cp ios/ViewController.swift "$VC" && echo "Injected: $VC"
           HANDLER=$(find .output/ios -name "SafariWebExtensionHandler.swift" | head -1)
           [ -n "$HANDLER" ] && cp ios/SafariWebExtensionHandler.swift "$HANDLER" && echo "Injected: $HANDLER"
-          cp ios/V2D.entitlements .output/ios/V2D.entitlements
           echo "── 转换产物目录树 ──"
           find .output/ios -maxdepth 3 -type f -name "*.swift" -o -name "*.entitlements" | head -20
 
