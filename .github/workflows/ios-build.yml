@@ -38,11 +38,15 @@ jobs:
           echo "── 转换产物 ──"
           find .output/ios -maxdepth 3 | head -20
 
-      - name: 注入自定义 Swift/Entitlements（App Group 原生桥 + 任务页）
+      - name: 注入自定义 Swift/Entitlements
         run: |
-          cp ios/SafariWebExtensionHandler.swift .output/ios/V2D/SafariWebExtensionHandler.swift
-          cp ios/ContentView.swift .output/ios/V2D/ContentView.swift
-          cp ios/V2D.entitlements .output/ios/V2D/V2D.entitlements
+          CV=$(find .output/ios -name "ContentView.swift" | head -1)
+          [ -n "$CV" ] && cp ios/ContentView.swift "$CV" && echo "Injected: $CV"
+          HANDLER=$(find .output/ios -name "SafariWebExtensionHandler.swift" | head -1)
+          [ -n "$HANDLER" ] && cp ios/SafariWebExtensionHandler.swift "$HANDLER" && echo "Injected: $HANDLER"
+          cp ios/V2D.entitlements .output/ios/V2D.entitlements
+          echo "── 转换产物目录树 ──"
+          find .output/ios -maxdepth 3 -type f -name "*.swift" -o -name "*.entitlements" | head -20
 
       - name: 编译（未签名）
         run: |
