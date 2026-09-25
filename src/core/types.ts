@@ -66,6 +66,8 @@ export interface Settings {
   blacklist: string[]
   /** C 引擎 MSE 深捕获白名单（M3 生效，先占位） */
   mseHookSites: string[]
+  /** 页面悬浮球（默认关闭，遵守零注入原则） */
+  floatingBall: boolean
   v115: V115Settings
 }
 
@@ -74,6 +76,7 @@ export const DEFAULT_SETTINGS: Settings = {
   blacklist: [],
   mseHookSites: [],
   v115: { enabled: false },
+  floatingBall: false,
 }
 
 export type { CompletedPart }

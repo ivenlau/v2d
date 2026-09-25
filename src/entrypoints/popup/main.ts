@@ -277,6 +277,18 @@ async function refresh(): Promise<void> {
 }
 
 async function init(): Promise<void> {
+  // 嵌入模式（悬浮球 iframe 面板）：隐藏外框差异、支持面板关闭
+  const embedded = new URLSearchParams(location.search).get('embedded') === '1'
+  if (embedded) {
+    document.body.classList.add('embedded')
+    const close = document.createElement('button')
+    close.className = 'icon-btn'
+    close.title = '收起面板'
+    close.textContent = '✕'
+    close.addEventListener('click', () => window.parent.postMessage('v2d-close-panel', '*'))
+    document.querySelector('.topbar')?.appendChild(close)
+  }
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   tabId = tab.id ?? 0
   tabUrl = tab.url ?? ''

@@ -38,6 +38,12 @@ jobs:
           echo "── 转换产物 ──"
           find .output/ios -maxdepth 3 | head -20
 
+      - name: 注入自定义 Swift/Entitlements（App Group 原生桥 + 任务页）
+        run: |
+          cp ios/SafariWebExtensionHandler.swift .output/ios/V2D/SafariWebExtensionHandler.swift
+          cp ios/ContentView.swift .output/ios/V2D/ContentView.swift
+          cp ios/V2D.entitlements .output/ios/V2D/V2D.entitlements
+
       - name: 编译（未签名）
         run: |
           PROJ=$(find .output/ios -name "*.xcodeproj" -maxdepth 3 | head -1)
@@ -54,6 +60,7 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=V2D/V2D.entitlements \
             build
 
       - name: 打包 IPA

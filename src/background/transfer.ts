@@ -90,6 +90,49 @@ async function persist(force = false): Promise<void> {
   lastPersist = now
   tasks = [...tasks].sort((a, b) => b.createdAt - a.createdAt).slice(0, MAX_TASKS).reverse()
   await chrome.storage.local.set({ [TASKS_KEY]: tasks })
+  // Safari/iOS：镜像任务数据到 App Group，供壳 App 内嵌任务页渲染
+  if (!import.meta.env.CHROME) mirrorToAppGroup()
+}
+
+/** 经原生桥把任务列表镜像进 App Group（失败静默，App 侧退化为空列表） */
+function mirrorToAppGroup(): void {
+  try {
+    chrome.runtime.sendNativeMessage(
+      'com.ivenlau.v2d',
+      { type: 'mirror', tasks },
+      () => {
+        void chrome.runtime.lastError
+      },
+    )
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Safari：消费壳 App 写入的操作命令（App 内嵌任务页的按钮） */
+export async function pollAppCommands(): Promise<void> {
+  if (import.meta.env.CHROME) return
+  try {
+    const r = await new Promise<{ commands?: Array<{ action: string; taskId: string }> }>((resolve) => {
+      chrome.runtime.sendNativeMessage(
+        'com.ivenlau.v2d',
+        { type: 'commands-get' },
+        (resp: { commands?: Array<{ action: string; taskId: string }> }) => resolve(resp ?? {}),
+      )
+    })
+    for (const c of r.commands ?? []) {
+      if (c.action === 'retry') await retryTask(c.taskId)
+      if (c.action === 'cancel') await cancelTask(c.taskId)
+      if (c.action === 'delete') await deleteTask(c.taskId)
+    }
+    if ((r.commands ?? []).length) {
+      chrome.runtime.sendNativeMessage('com.ivenlau.v2d', { type: 'commands-clear' }, () => {
+        void chrome.runtime.lastError
+      })
+    }
+  } catch {
+    /* 原生桥不可用（Chrome 平台/未授予）忽略 */
+  }
 }
 
 export async function listTasks(): Promise<TransferTask[]> {

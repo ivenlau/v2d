@@ -26,10 +26,15 @@ function flashSaved(): void {
 async function initGeneric(): Promise<void> {
   const settings = await loadSettings()
   input('#badge').checked = settings.badge
+  input('#floating-ball').checked = settings.floatingBall
   area('#blacklist').value = settings.blacklist.join('\n')
 
   input('#badge').addEventListener('change', async () => {
     await saveSettings({ badge: input('#badge').checked })
+    flashSaved()
+  })
+  input('#floating-ball').addEventListener('change', async () => {
+    await saveSettings({ floatingBall: input('#floating-ball').checked })
     flashSaved()
   })
   // change 事件在失焦时触发，避免每敲一个字符写一次 storage

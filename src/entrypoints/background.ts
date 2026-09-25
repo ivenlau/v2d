@@ -28,6 +28,7 @@ import type { BgRequest } from '@/core/messages'
 import { SITE_PROBES } from '@/background/siteProbes'
 import {
   applyStagedReady,
+  pollAppCommands,
   applyTaskEvent,
   cancelTask,
   clearFinishedTasks,
@@ -472,6 +473,26 @@ export default defineBackground(() => {
 
   // SW 冷启动：恢复被杀期间卡住的任务并继续泵
   void recoverStuckTasks().catch((e) => console.warn('[V2D] 任务恢复失败', e))
+
+  // 悬浮球（默认关闭）：页面加载完成后按设置注入（脚本自防重复注入）
+  chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+    if (info.status !== 'complete' || !tab.url) return
+    try {
+      if (!/^(https?|file):/.test(tab.url)) return
+      const { floatingBall, blacklist } = await getSettings()
+      if (!floatingBall) return
+      const host = new URL(tab.url).hostname
+      if (hostInBlacklist(host, blacklist)) return
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['floating-ball.js'] }).catch(() => {})
+    } catch {
+      /* 受限页面（chrome:// 等）忽略 */
+    }
+  })
+
+  // Safari/iOS：轮询壳 App 内嵌任务页写入的操作命令（真 App 内嵌桥）
+  if (!import.meta.env.CHROME) {
+    setInterval(() => void pollAppCommands().catch(() => {}), 10_000)
+  }
 
   console.log('[V2D] background ready')
 })
