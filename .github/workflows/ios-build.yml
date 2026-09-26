@@ -1,14 +1,22 @@
 name: iOS Build
 
 # 手动触发，或在打 tag 时自动出包
+# includes_app_group = true 时启用 App Group entitlement（需付费开发者账号）
 on:
   workflow_dispatch:
+    inputs:
+      includes_app_group:
+        description: '启用 App Group（需付费开发者账号）'
+        type: boolean
+        default: false
   push:
     tags: ['v*']
 
 jobs:
   build:
     runs-on: macos-14
+    env:
+      APP_GROUP_FLAG: ${{ github.event.inputs.includes_app_group == 'true' && 'group' || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,6 +52,12 @@ jobs:
           [ -n "$VC" ] && cp ios/ViewController.swift "$VC" && echo "Injected: $VC"
           HANDLER=$(find .output/ios -name "SafariWebExtensionHandler.swift" | head -1)
           [ -n "$HANDLER" ] && cp ios/SafariWebExtensionHandler.swift "$HANDLER" && echo "Injected: $HANDLER"
+          # App Group entitlements 仅在付费构建时注入（勾选 includes_app_group）
+          if [ "${{ github.event.inputs.includes_app_group }}" = "true" ]; then
+            ENT_DIR=$(dirname "$VC")
+            cp ios/V2D.entitlements "$ENT_DIR/V2D.entitlements"
+            echo "App Group entitlements 已注入 → $ENT_DIR/V2D.entitlements"
+          fi
           echo "── 转换产物目录树 ──"
           find .output/ios -maxdepth 3 -type f -name "*.swift" -o -name "*.entitlements" | head -20
 
@@ -57,12 +71,18 @@ jobs:
           xcodebuild -list -project "$PROJ_NAME"
           SCHEME=$(xcodebuild -list -project "$PROJ_NAME" | awk '/Schemes:/{f=1;next} f&&NF{gsub(/^[ \t]+/,""); print; exit}' | head -1)
           echo "scheme: $SCHEME"
+          # App Group entitlements：付费开发者账号勾选 includes_app_group 后取消下行注释
+          ENT_FLAG=""
+          if [ "${{ github.event.inputs.includes_app_group }}" = "true" ]; then
+            ENT_FLAG="CODE_SIGN_ENTITLEMENTS=V2D/V2D.entitlements"
+          fi
           xcodebuild -project "$PROJ_NAME" \
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            $ENT_FLAG \
             build
 
       - name: 打包 IPA
