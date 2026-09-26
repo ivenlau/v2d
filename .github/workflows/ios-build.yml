@@ -91,8 +91,9 @@ jobs:
         run: |
           APP=$(find .output/ios -name "*.app" -path "*Release-iphoneos*" | head -1)
           echo "app: $APP"
-          # 移除 storyboard 引用（converter 模板的占位 UI 会被 iOS 加载覆盖我们的 SwiftUI）
           PLIST="$APP/Info.plist"
+          # 移除 storyboard 与 scene 引用（converter 模板的占位 UI 会被 iOS 加载覆盖我们的 SwiftUI）
+          plutil -remove UIApplicationSceneManifest "$PLIST" 2>/dev/null || true
           plutil -remove UISceneStoryboardFile "$PLIST" 2>/dev/null || true
           plutil -remove UIMainStoryboardFile "$PLIST" 2>/dev/null || true
           rm -rf "$APP/Base.lproj"
