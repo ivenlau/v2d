@@ -52,6 +52,8 @@ jobs:
           [ -n "$VC" ] && cp ios/ViewController.swift "$VC" && echo "Injected: $VC"
           HANDLER=$(find .output/ios -name "SafariWebExtensionHandler.swift" | head -1)
           [ -n "$HANDLER" ] && cp ios/SafariWebExtensionHandler.swift "$HANDLER" && echo "Injected: $HANDLER"
+          APPDLG=$(find .output/ios -name "AppDelegate.swift" | head -1)
+          [ -n "$APPDLG" ] && cp ios/AppDelegate.swift "$APPDLG" && echo "Injected: $APPDLG"
           SCENE=$(find .output/ios -name "SceneDelegate.swift" | head -1)
           [ -n "$SCENE" ] && cp ios/SceneDelegate.swift "$SCENE" && echo "Injected: $SCENE"
           # App Group entitlements 仅在付费构建时注入（勾选 includes_app_group）
