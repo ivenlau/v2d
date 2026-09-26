@@ -99,6 +99,12 @@ jobs:
           plutil -remove UISceneStoryboardFile "$PLIST" 2>/dev/null || true
           plutil -remove UIMainStoryboardFile "$PLIST" 2>/dev/null || true
           rm -rf "$APP/Base.lproj"
+          # 全面屏声明（防任务切换器/启动时上下黑边）：LaunchScreen storyboard 已随
+          # Base.lproj 删除， dangling 引用要清掉；再用空 UILaunchScreen 字典声明
+          # 支持全面屏——没有它 iOS 按兼容分辨率跑，内容拉伸且上下补黑边
+          plutil -remove UILaunchStoryboardName "$PLIST" 2>/dev/null || true
+          plutil -insert UILaunchScreen -json "{}" "$PLIST" 2>/dev/null \
+            || plutil -replace UILaunchScreen -json "{}" "$PLIST"
           echo "── 清理后 Info.plist 场景配置 ──"
           plutil -p "$PLIST" | grep -i "storyboard\|scene" || echo "（无 storyboard 引用 ✓）"
           mkdir -p Payload
