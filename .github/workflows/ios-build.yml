@@ -52,6 +52,8 @@ jobs:
           [ -n "$VC" ] && cp ios/ViewController.swift "$VC" && echo "Injected: $VC"
           HANDLER=$(find .output/ios -name "SafariWebExtensionHandler.swift" | head -1)
           [ -n "$HANDLER" ] && cp ios/SafariWebExtensionHandler.swift "$HANDLER" && echo "Injected: $HANDLER"
+          SCENE=$(find .output/ios -name "SceneDelegate.swift" | head -1)
+          [ -n "$SCENE" ] && cp ios/SceneDelegate.swift "$SCENE" && echo "Injected: $SCENE"
           # App Group entitlements 仅在付费构建时注入（勾选 includes_app_group）
           if [ "${{ github.event.inputs.includes_app_group }}" = "true" ]; then
             ENT_DIR=$(dirname "$VC")
@@ -89,6 +91,13 @@ jobs:
         run: |
           APP=$(find .output/ios -name "*.app" -path "*Release-iphoneos*" | head -1)
           echo "app: $APP"
+          # 移除 storyboard 引用（converter 模板的占位 UI 会被 iOS 加载覆盖我们的 SwiftUI）
+          PLIST="$APP/Info.plist"
+          plutil -remove UISceneStoryboardFile "$PLIST" 2>/dev/null || true
+          plutil -remove UIMainStoryboardFile "$PLIST" 2>/dev/null || true
+          rm -rf "$APP/Base.lproj"
+          echo "── 清理后 Info.plist 场景配置 ──"
+          plutil -p "$PLIST" | grep -i "storyboard\|scene" || echo "（无 storyboard 引用 ✓）"
           mkdir -p Payload
           cp -r "$APP" Payload/
           zip -qry V2D-unsigned.ipa Payload
