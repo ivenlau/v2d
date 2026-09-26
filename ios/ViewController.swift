@@ -5,6 +5,13 @@ import UIKit
 class ViewController: UIViewController {
     private let tableView = UITableView()
 
+    // 程序化创建视图，跳过 storyboard/xib 加载
+    // （converter 生成的 storyboard 引用旧 outlet，替换 VC 后 outlet 不存在 → NSException 崩溃）
+    override func loadView() {
+        view = UIView(frame: UIScreen.main.bounds)
+        view.backgroundColor = .systemBackground
+    }
+
     private var tasks: [(name: String, state: String, error: String)] = []
 
     override func viewDidLoad() {
