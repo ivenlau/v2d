@@ -38,9 +38,8 @@
 
         <!-- 认证引导（§9.5：首次开启即进入；仅扫码） -->
         <div id="v115-auth" class="card hidden">
-          <p class="dim">使用 115 App 扫描二维码，并在手机上确认授权</p>
-          <p class="dim">iOS 提示：若无法连接 115，请到 设置 → Safari → 扩展 → V2D，把网站访问权限设为「所有网站」后重试</p>
-          <p class="dim">iOS 提示：若无法连接 115，请到 设置 → Safari → 扩展 → V2D，把网站访问权限设为「所有网站」后重试</p>
+          <p class="dim">使用 115 App 扫描二维码授权</p>
+          <p class="dim">提示：请把网站访问权限设为 所有网站</p>
           <div class="qr-box">
             <img id="qr-img" class="qr hidden" alt="115 授权二维码" />
             <div id="qr-status" class="dim">点击「生成二维码」开始（2 分钟内有效）</div>
@@ -53,10 +52,7 @@
           <p id="v115-space" class="dim"></p>
 
           <h3>默认保存目录</h3>
-          <p class="dim">
-            已保存：<code id="dir-saved">默认规则</code>
-            <span class="dim">（默认规则 = <code>/来自浏览器/{站点}/{年-月}/</code>，转存时自动创建）</span>
-          </p>
+          <p class="dim">已保存：<code id="dir-saved">默认规则</code></p>
           <div class="dir-browser">
             <div id="dir-breadcrumbs" class="crumbs"></div>
             <div id="dir-list" class="dir-list"></div>
@@ -65,18 +61,10 @@
               <button id="dir-create" class="btn">新建</button>
             </div>
             <div class="row">
-              <button id="dir-select" class="btn primary">选定当前浏览的目录</button>
-              <button id="dir-reset" class="btn">恢复默认规则</button>
+              <button id="dir-select" class="btn primary">选定目录</button>
+              <button id="dir-reset" class="btn">恢复默认</button>
             </div>
           </div>
-
-          <h3>转存通道</h3>
-          <p class="dim">
-            自动转存一律走「浏览器直传」：<b>秒传优先</b>（SHA1 命中零上传），未命中再 OSS 分片直传。
-          </p>
-          <p class="dim">
-            🥚 彩蛋：115 离线下载已改为手动入口，在「传输管理」页粘贴 直链 / 磁力 / ed2k 提交（115 会员功能）。
-          </p>
 
           <div class="row">
             <button id="v115-logout" class="btn danger">退出 115 登录</button>
