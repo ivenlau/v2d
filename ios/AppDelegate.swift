@@ -1,6 +1,7 @@
 import UIKit
 
 /// 无 storyboard 生命周期：AppDelegate 直接创建窗口并挂载 ViewController
+@main
 class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
