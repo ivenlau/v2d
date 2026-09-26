@@ -151,27 +151,40 @@ class ViewController: UIViewController {
                 steps: Self.readySteps))
         }
 
-        let footer = UILabel()
-        footer.numberOfLines = 0
-        footer.textAlignment = .center
-        footer.font = .systemFont(ofSize: 12)
-        footer.textColor = UIColor.white.withAlphaComponent(0.75)
-        footer.text = newMode == .ready
-            ? "任务进度暂不在本 App 内展示，请在 Safari 扩展的「传输管理」中查看"
-            : "启用扩展后回到本 App，这里会自动换成使用说明"
-        contentStack.addArrangedSubview(footer)
+        // 已启动态才有底部说明；引导页保持干净
+        if newMode == .ready {
+            let footer = UILabel()
+            footer.numberOfLines = 0
+            footer.textAlignment = .center
+            footer.font = .systemFont(ofSize: 12)
+            footer.textColor = UIColor.white.withAlphaComponent(0.75)
+            footer.text = "任务进度暂不在本 App 内展示，请在 Safari 扩展的「传输管理」中查看"
+            contentStack.addArrangedSubview(footer)
+        }
     }
 
     // MARK: 品牌区（垂直栈，全部居中）
 
     private func buildHero() -> UIView {
-        let icon = UILabel()
-        icon.text = "🎬"
-        icon.font = .systemFont(ofSize: 34)
-        icon.textAlignment = .center
-        icon.backgroundColor = UIColor.white.withAlphaComponent(0.22)
-        icon.layer.cornerRadius = 18
-        icon.layer.masksToBounds = true
+        // 图标与主屏一致：读 asset catalog 的 AppIcon（converter 模板为单尺寸图）；
+        // 加载失败退化为 emoji 占位
+        let icon: UIView
+        if let image = UIImage(named: "AppIcon") {
+            let iv = UIImageView(image: image)
+            iv.contentMode = .scaleAspectFill
+            iv.layer.cornerRadius = 14 // 64pt × 22.4%，与系统圆角一致
+            iv.layer.masksToBounds = true
+            icon = iv
+        } else {
+            let label = UILabel()
+            label.text = "🎬"
+            label.font = .systemFont(ofSize: 34)
+            label.textAlignment = .center
+            label.backgroundColor = UIColor.white.withAlphaComponent(0.22)
+            label.layer.cornerRadius = 18
+            label.layer.masksToBounds = true
+            icon = label
+        }
         icon.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 64),
@@ -185,7 +198,7 @@ class ViewController: UIViewController {
         name.textAlignment = .center
 
         let tagline = UILabel()
-        tagline.text = "Safari 视频转存助手 · 嗅探即存"
+        tagline.text = "Safari 视频转存助手"
         tagline.font = .systemFont(ofSize: 14)
         tagline.textColor = UIColor.white.withAlphaComponent(0.8)
         tagline.textAlignment = .center
