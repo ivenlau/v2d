@@ -97,6 +97,19 @@ h2 { font-size: 15px; margin: 18px 0 10px; padding-bottom: 6px; border-bottom: 1
 .empty { color: var(--dim); text-align: center; padding: 24px 0; }
 .instant { color: var(--ok); font-size: 12px; }
 .actions.flash { animation: flash 1.2s ease 2; }
+
+/* ── 移动端适配 ── */
+@media (max-width: 480px) {
+  body { padding: 12px; }
+  .wrap { padding: 8px; }
+  .topbar { padding: 10px 12px; }
+  .title { font-size: 15px; }
+  .task { padding: 10px 8px; }
+  .task-top { flex-wrap: wrap; gap: 6px; }
+  .btn { min-height: 44px; padding: 10px 16px; font-size: 14px; }
+  .offline-box .row { flex-direction: column; }
+  .offline-box input { width: 100%; }
+}
 @keyframes flash {
   0%, 100% { background: transparent; }
   50% { background: var(--accent-soft); }

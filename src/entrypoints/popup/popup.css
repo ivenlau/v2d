@@ -181,6 +181,14 @@ button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.4s; }
 .task-meta { color: var(--dim); font-size: 11px; }
 
+/* ── 移动端适配（iOS 弹窗 sheet / 小屏） ── */
+@media (max-width: 420px) {
+  body { width: 100vw; max-height: 100vh; }
+  .task-actions { gap: 6px; flex-wrap: wrap; }
+  .mini-btn { padding: 6px 12px; font-size: 12.5px; }
+  .icon-btn { min-width: 36px; min-height: 36px; }
+}
+
 .toast {
   position: fixed;
   bottom: 40px;
