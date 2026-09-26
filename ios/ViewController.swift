@@ -192,7 +192,7 @@ class ViewController: UIViewController {
 
         let stack = UIStackView(arrangedSubviews: [icon, name, tagline])
         stack.axis = .vertical
-        stack.alignment = .centerX
+        stack.alignment = .center
         stack.spacing = 8
         stack.setCustomSpacing(14, after: icon)
         return stack
