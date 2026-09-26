@@ -501,6 +501,9 @@ async function renderTasks(): Promise<void> {
   }
 }
 
+// iOS：弹窗被打开即证明扩展在运行——经后台把「已启动」标记写进 App Group
+void chrome.runtime.sendMessage({ type: 'v2d/app-ping' }).catch(() => {})
+
 void init().catch((e) => {
   console.error(e)
   $('#empty').querySelector('p')!.textContent = `初始化失败：${String(e)}`

@@ -14,6 +14,8 @@ export default defineContentScript({
     }
     if ((window as unknown as BallWindow).__v2dFloatingBall) return
     ;(window as unknown as BallWindow).__v2dFloatingBall = true
+    // iOS：内容脚本被注入即证明扩展在运行——经后台把「已启动」标记写进 App Group（失败静默）
+    void chrome.runtime.sendMessage({ type: 'v2d/app-ping' }).catch(() => {})
     // iOS 加固：body 未就绪不注入（避免挂到 <html> 破坏布局）
     if (!document.body) return
     if (!location.protocol.startsWith('http')) return

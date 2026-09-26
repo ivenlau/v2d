@@ -44,6 +44,8 @@ class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         let defaults = UserDefaults(suiteName: group)
 
         var response: [String: Any] = ["ok": true]
+        // 任意原生消息到达即证明扩展已启用并运行——App 主页据此把「启用引导」换成「使用说明」
+        defaults?.set(true, forKey: "extension.activated")
         switch type {
         case "mirror":
             if let tasks = message["tasks"] {

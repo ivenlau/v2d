@@ -467,6 +467,9 @@ export default defineBackground(() => {
       void chrome.storage.local.set({
         '115.open_token': { ...msg.pair, saved_at: Date.now() },
       })
+    } else if (msg?.type === 'v2d/app-ping') {
+      // 弹窗/设置页/悬浮球上报「我在运行」：顺手拉一次原生桥（App 侧写已启动标记 + 消费命令）
+      void pollAppCommands().catch(() => {})
     }
     return false
   })
@@ -476,6 +479,7 @@ export default defineBackground(() => {
 
   // Safari/iOS：轮询壳 App 内嵌任务页写入的操作命令（真 App 内嵌桥）
   if (!import.meta.env.CHROME) {
+    void pollAppCommands().catch(() => {}) // 后台页被拉起即 ping 一次：写「已启动」标记，不等轮询
     setInterval(() => void pollAppCommands().catch(() => {}), 10_000)
   }
 

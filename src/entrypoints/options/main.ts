@@ -161,8 +161,7 @@ function trailPath(): string {
 
 function renderSavedPath(root?: string): void {
   // 「已保存」与「正在浏览」是两回事：前者持久显示，不被目录浏览覆盖（历史 bug）
-  $('#dir-saved').textContent =
-    root?.trim() || '默认规则（/来自浏览器/{站点}/{年-月}/）'
+  $('#dir-saved').textContent = root?.trim() || '默认规则'
 }
 
 async function showActive(): Promise<void> {
@@ -271,3 +270,6 @@ input('#v115-logout').addEventListener('click', async () => {
 
 void initGeneric()
 void init115()
+
+// iOS：设置页被打开即证明扩展在运行——经后台把「已启动」标记写进 App Group（壳 App 主页据此切换说明卡片）
+void chrome.runtime.sendMessage({ type: 'v2d/app-ping' }).catch(() => {})
