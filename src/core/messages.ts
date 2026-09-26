@@ -39,3 +39,22 @@ export interface TaskEvent {
 export async function send<T = unknown>(req: BgRequest): Promise<T> {
   return chrome.runtime.sendMessage(req) as Promise<T>
 }
+
+/**
+ * 尽力而为的后台 ping（iOS「已启动」标记）。
+ * Safari 的 chrome 命名空间对回调/承诺的支持不一致：统一走回调风格，
+ * 返回 Promise 就再兜一层 catch；同步抛错（上下文失效等）也吞掉。
+ * 任何情况下都不允许抛错——调用方（尤其内容脚本）不能因此中断。
+ */
+export function pingBackground(): void {
+  try {
+    const r = (
+      chrome.runtime as unknown as {
+        sendMessage(msg: unknown, cb?: (resp: unknown) => void): unknown
+      }
+    ).sendMessage({ type: 'v2d/app-ping' }, () => void chrome.runtime.lastError)
+    if (r instanceof Promise) r.catch(() => {})
+  } catch {
+    /* ignore */
+  }
+}

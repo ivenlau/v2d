@@ -138,7 +138,11 @@ function renderTask(t: TaskView): HTMLElement {
     const save = document.createElement('button')
     save.className = 'btn primary'
     save.textContent = '⬇ 保存到文件'
-    save.addEventListener('click', () => void saveStagedById(t.id))
+    save.addEventListener('click', () =>
+      saveStagedById(t.id).catch((e: unknown) =>
+        alert(`保存失败：${e instanceof Error ? e.message : String(e)}`),
+      ),
+    )
     actions.appendChild(save)
   }
   if (!TERMINAL.has(t.state) && t.state !== 'saving' && t.state !== 'staged') {
@@ -154,7 +158,26 @@ function renderTask(t: TaskView): HTMLElement {
   return el
 }
 
-/** Safari：读 OPFS 待保存产物并触发下载（必须由用户点击手势调用） */
+/** iOS UA：<a download> 触发 blob 下载在 iOS Safari 必失败（WebKitBlobResource 错误 1），需走 Web Share */
+const IS_IOS = /iP(hone|od|ad)/.test(navigator.userAgent)
+
+/** 以目标文件名/类型重建 File：OPFS 文件名是 {taskId}.part，直接分享会存成 .part */
+function shareableFile(file: File, name: string): File {
+  const ext = name.split('.').pop()?.toLowerCase() ?? ''
+  const type =
+    ext === 'mp4'
+      ? 'video/mp4'
+      : ext === 'webm'
+        ? 'video/webm'
+        : ext === 'ts'
+          ? 'video/mp2t'
+          : 'application/octet-stream'
+  return new File([file], name, { type })
+}
+
+/** Safari：读 OPFS 待保存产物并触发保存（必须由用户点击手势调用）。
+ *  iOS：Web Share API 调起系统分享面板，用户选「存储到文件」；
+ *  其余平台：保持 <a download> 下载。用户取消分享不算失败，任务保持待保存可重试。 */
 async function saveStagedById(taskId: string): Promise<void> {
   const t = lastTasks.find((x) => x.id === taskId)
   const name = t?.stagedFileName ?? t?.fileName ?? 'video.mp4'
@@ -163,14 +186,28 @@ async function saveStagedById(taskId: string): Promise<void> {
   const fh = await dir.getFileHandle(`${taskId}.part`)
   const file = await fh.getFile()
   if (file.size === 0) throw new Error('暂存文件为空')
-  const url = URL.createObjectURL(file)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 30_000)
+
+  if (IS_IOS && typeof navigator.canShare === 'function') {
+    const share = shareableFile(file, name)
+    if (!navigator.canShare({ files: [share] })) throw new Error('系统不支持分享保存该文件')
+    try {
+      await navigator.share({ files: [share], title: name })
+    } catch (e) {
+      // AbortError=用户取消分享面板；NotAllowedError=手势失效。任务保持待保存，可再点
+      if (e instanceof DOMException && (e.name === 'AbortError' || e.name === 'NotAllowedError')) return
+      throw e
+    }
+  } else {
+    const url = URL.createObjectURL(file)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  }
+
   try {
     await dir.removeEntry(`${taskId}.part`)
   } catch {

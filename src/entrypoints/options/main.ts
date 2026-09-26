@@ -5,6 +5,7 @@
 
 import QRCode from 'qrcode'
 import { loadSettings, saveSettings } from '@/core/settings'
+import { pingBackground } from '@/core/messages'
 import { client115 } from '@/providers/115/runtime'
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
@@ -272,4 +273,4 @@ void initGeneric()
 void init115()
 
 // iOS：设置页被打开即证明扩展在运行——经后台把「已启动」标记写进 App Group（壳 App 主页据此切换说明卡片）
-void chrome.runtime.sendMessage({ type: 'v2d/app-ping' }).catch(() => {})
+pingBackground()

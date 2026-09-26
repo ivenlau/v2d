@@ -4,7 +4,7 @@
  */
 
 import '@/entrypoints/popup/popup.css'
-import { send } from '@/core/messages'
+import { pingBackground, send } from '@/core/messages'
 import { hostInBlacklist, scoreCandidate } from '@/core/sniffer/patterns'
 import { humanizeError } from '@/core/humanize'
 import type { MediaCandidate } from '@/core/types'
@@ -502,7 +502,7 @@ async function renderTasks(): Promise<void> {
 }
 
 // iOS：弹窗被打开即证明扩展在运行——经后台把「已启动」标记写进 App Group
-void chrome.runtime.sendMessage({ type: 'v2d/app-ping' }).catch(() => {})
+pingBackground()
 
 void init().catch((e) => {
   console.error(e)

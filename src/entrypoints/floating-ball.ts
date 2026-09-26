@@ -5,6 +5,8 @@
  * （iframe 加载扩展 popup 页，嵌入模式下与页面通过 postMessage 关闭面板）。
  */
 
+import { pingBackground } from '@/core/messages'
+
 export default defineContentScript({
   matches: ['<all_urls>'],
   runAt: 'document_idle',
@@ -14,27 +16,34 @@ export default defineContentScript({
     }
     if ((window as unknown as BallWindow).__v2dFloatingBall) return
     ;(window as unknown as BallWindow).__v2dFloatingBall = true
-    // iOS：内容脚本被注入即证明扩展在运行——经后台把「已启动」标记写进 App Group（失败静默）
-    void chrome.runtime.sendMessage({ type: 'v2d/app-ping' }).catch(() => {})
     // iOS 加固：body 未就绪不注入（避免挂到 <html> 破坏布局）
     if (!document.body) return
     if (!location.protocol.startsWith('http')) return
 
     // ── 设置门禁：未开启 / 黑名单 → 不注入 ──
-    try {
-      const stored = (await chrome.storage.local.get('settings')).settings as {
-        floatingBall?: boolean
-        blacklist?: string[]
+    // iOS 加固：Safari 的 chrome 命名空间可能不返回 Promise（await undefined 会崩），
+    // 统一回调风格读设置，任何异常都按「未开启」处理（保持零注入原则）
+    type BallSettings = { settings?: { floatingBall?: boolean; blacklist?: string[] } }
+    const stored = await new Promise<BallSettings>((resolve) => {
+      try {
+        // 回调签名在 @types/chrome 里返回 void，运行时可能返回 Promise——转型后兼容两者
+        const api = chrome.storage.local as unknown as {
+          get(key: string, cb: (res: unknown) => void): unknown
+        }
+        const r = api.get('settings', (res) => resolve((res ?? {}) as BallSettings))
+        if (r instanceof Promise)
+          r.then((v) => resolve((v ?? {}) as BallSettings)).catch(() => resolve({}))
+      } catch {
+        resolve({})
       }
-      if (!stored?.floatingBall) return
-      const host = location.hostname
-      const blocked = (stored.blacklist ?? []).some(
-        (e) => host === e || host.endsWith('.' + e),
-      )
-      if (blocked) return
-    } catch {
-      return
-    }
+    })
+    const setting = stored?.settings
+    if (!setting?.floatingBall) return
+    const siteHost = location.hostname
+    const blocked = (setting.blacklist ?? []).some(
+      (e) => siteHost === e || siteHost.endsWith('.' + e),
+    )
+    if (blocked) return
 
     const BALL_SIZE = 44
     const PANEL_W = 392
@@ -167,6 +176,9 @@ export default defineContentScript({
 
     shadow.append(ball, wrap)
     document.body.appendChild(host)
+
+    // 注入完成 → ping 后台写「已启动」标记（失败静默，绝不影响球本身）
+    pingBackground()
 
     window.addEventListener('resize', () => {
       clamp()
