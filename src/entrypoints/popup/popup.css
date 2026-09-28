@@ -182,7 +182,9 @@ button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .task-meta { color: var(--dim); font-size: 11px; }
 
 /* ── 移动端适配（iOS 弹窗 sheet / 小屏） ── */
-@media (max-width: 420px) {
+/* pointer: coarse 门禁：桌面弹窗视口只有 ~380px（body 固定宽），max-width 断点在桌面恒命中；
+   且弹窗尺寸"跟随内容"，100vw/100vh 与之循环依赖会把弹窗挤小。仅触屏设备（iOS）生效。 */
+@media (max-width: 420px) and (pointer: coarse) {
   body { width: 100vw; max-height: 100vh; }
   .task-actions { gap: 6px; flex-wrap: wrap; }
   .mini-btn { padding: 6px 12px; font-size: 12.5px; }
