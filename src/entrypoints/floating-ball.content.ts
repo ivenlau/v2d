@@ -3,6 +3,8 @@
  * 未开启直接返回（单次 storage 读 + 早退，开销可忽略）。
  * Shadow DOM 隔离样式；可拖动（记忆位置）；点击展开页内快捷面板
  * （iframe 加载扩展 popup 页，嵌入模式下与页面通过 postMessage 关闭面板）。
+ * 面板拖动由嵌入 popup 顶栏（非按钮处）发起：iframe 是独立文档、父页面收不到
+ * 其内部指针事件，经 postMessage 转发 screen 坐标偏移（不受面板自身位移影响）。
  */
 
 import { pingBackground } from '@/core/messages'
@@ -86,6 +88,7 @@ export default defineContentScript({
         border: 1px solid rgba(0,0,0,.15);
         display: none;
       }
+      .panel-wrap.open { display: block; }
       iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
     `
     shadow.append(style)
@@ -110,6 +113,27 @@ export default defineContentScript({
     const iframe = document.createElement('iframe')
     iframe.src = chrome.runtime.getURL('popup.html') + '?embedded=1'
     wrap.appendChild(iframe)
+
+    // 面板位置（拖动记忆；未拖过则每次打开居中于球）
+    let pw = PANEL_W
+    let ph = PANEL_H
+    let px = 0
+    let py = 0
+    let panelPlaced = false
+    const savedPanelPos = localStorage.getItem('v2d-panel-pos')
+    if (savedPanelPos) {
+      px = Number(JSON.parse(savedPanelPos).x)
+      py = Number(JSON.parse(savedPanelPos).y)
+      panelPlaced = true
+    }
+    const clampPanel = (): void => {
+      px = Math.min(Math.max(8, px), window.innerWidth - pw - 8)
+      py = Math.min(Math.max(8, py), window.innerHeight - ph - 8)
+    }
+    const applyPanelPos = (): void => {
+      wrap.style.left = `${px}px`
+      wrap.style.top = `${py}px`
+    }
 
     function applyPos(): void {
       ball.style.left = `${x}px`
@@ -154,24 +178,47 @@ export default defineContentScript({
     function togglePanel(): void {
       panelOpen = !panelOpen
       if (panelOpen) {
-        // 面板宽度自适应视口（iOS 窄屏），位置居中于球并夹紧在视口内
-        const w = Math.min(PANEL_W, window.innerWidth - 16)
-        const h = Math.min(PANEL_H, Math.round(window.innerHeight * 0.82))
-        wrap.style.width = `${w}px`
-        wrap.style.height = `${h}px`
-        const left = x + BALL_SIZE / 2 - w / 2
-        wrap.style.left = `${Math.max(8, Math.min(left, window.innerWidth - w - 8))}px`
-        const top = y + BALL_SIZE / 2 - h / 2
-        wrap.style.top = `${Math.max(8, Math.min(top, window.innerHeight - h - 8))}px`
+        // 面板尺寸自适应视口（iOS 窄屏）；位置：拖动过→记忆位置，否则居中于球
+        pw = Math.min(PANEL_W, window.innerWidth - 16)
+        ph = Math.min(PANEL_H, Math.round(window.innerHeight * 0.82))
+        wrap.style.width = `${pw}px`
+        wrap.style.height = `${ph}px`
+        if (!panelPlaced) {
+          px = x + BALL_SIZE / 2 - pw / 2
+          py = y + BALL_SIZE / 2 - ph / 2
+        }
+        clampPanel()
+        applyPanelPos()
         wrap.classList.add('open')
       } else {
         wrap.classList.remove('open')
       }
     }
 
-    // 面板内（嵌入 popup）发来的关闭消息
+    // 面板内（嵌入 popup）发来的消息：关闭面板 / 顶栏拖动。
+    // screen 坐标偏移不含面板自身位移，连续拖动不会振荡；只认自己面板发来的消息
+    let dragBasePx = 0
+    let dragBasePy = 0
     window.addEventListener('message', (e: MessageEvent) => {
-      if (e.data === 'v2d-close-panel' && panelOpen) togglePanel()
+      if (e.source !== iframe.contentWindow) return
+      const d = e.data as string | { type?: string; dx?: number; dy?: number } | undefined
+      if (typeof d === 'string') {
+        if (d === 'v2d-close-panel' && panelOpen) togglePanel()
+        return
+      }
+      if (!panelOpen || !d?.type) return
+      if (d.type === 'v2d-panel-drag-start') {
+        dragBasePx = px
+        dragBasePy = py
+      } else if (d.type === 'v2d-panel-drag' && typeof d.dx === 'number' && typeof d.dy === 'number') {
+        px = dragBasePx + d.dx
+        py = dragBasePy + d.dy
+        panelPlaced = true
+        clampPanel()
+        applyPanelPos()
+      } else if (d.type === 'v2d-panel-drag-end') {
+        localStorage.setItem('v2d-panel-pos', JSON.stringify({ x: px, y: py }))
+      }
     })
 
     shadow.append(ball, wrap)
@@ -183,6 +230,10 @@ export default defineContentScript({
     window.addEventListener('resize', () => {
       clamp()
       applyPos()
+      if (panelOpen) {
+        clampPanel()
+        applyPanelPos()
+      }
     })
   },
 })

@@ -277,7 +277,7 @@ async function refresh(): Promise<void> {
 }
 
 async function init(): Promise<void> {
-  // 嵌入模式（悬浮球 iframe 面板）：隐藏外框差异、支持面板关闭
+  // 嵌入模式（悬浮球 iframe 面板）：隐藏外框差异、支持面板关闭与顶栏拖动
   const embedded = new URLSearchParams(location.search).get('embedded') === '1'
   if (embedded) {
     document.body.classList.add('embedded')
@@ -287,6 +287,37 @@ async function init(): Promise<void> {
     close.textContent = '✕'
     close.addEventListener('click', () => window.parent.postMessage('v2d-close-panel', '*'))
     document.querySelector('.topbar')?.appendChild(close)
+
+    // 顶栏（非按钮处）按住拖动面板：iframe 是独立文档，宿主收不到这里的指针事件，
+    // 把 screen 坐标偏移转发给宿主（screenX/Y 不含面板自身位移，连续拖动不会振荡）
+    const topbar = document.querySelector<HTMLElement>('.topbar')
+    let dragFromX = 0
+    let dragFromY = 0
+    let topbarDragging = false
+    topbar?.addEventListener('pointerdown', (e) => {
+      if ((e.target as HTMLElement).closest('button')) return
+      topbarDragging = true
+      dragFromX = e.screenX
+      dragFromY = e.screenY
+      topbar.setPointerCapture(e.pointerId)
+      window.parent.postMessage({ type: 'v2d-panel-drag-start' }, '*')
+    })
+    topbar?.addEventListener('pointermove', (e) => {
+      if (!topbarDragging) return
+      window.parent.postMessage(
+        { type: 'v2d-panel-drag', dx: e.screenX - dragFromX, dy: e.screenY - dragFromY },
+        '*',
+      )
+    })
+    const endTopbarDrag = (): void => {
+      if (!topbarDragging) return
+      topbarDragging = false
+      window.parent.postMessage({ type: 'v2d-panel-drag-end' }, '*')
+    }
+    topbar?.addEventListener('pointerup', endTopbarDrag)
+    topbar?.addEventListener('pointercancel', endTopbarDrag)
+    // 指针被父页面/系统抢走时隐式释放捕获，也要结束拖动（防拖动状态卡死）
+    topbar?.addEventListener('lostpointercapture', endTopbarDrag)
   }
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })

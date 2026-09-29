@@ -32,6 +32,15 @@ body {
 }
 /* 悬浮球 iframe 嵌入模式：铺满面板 */
 body.embedded { width: 100%; height: 100vh; max-height: none; }
+/* 嵌入模式顶栏：非按钮处即面板拖动区（screen 坐标经 postMessage 转发给宿主） */
+body.embedded .topbar {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+body.embedded .topbar:active { cursor: grabbing; }
+body.embedded .topbar button { cursor: pointer; }
 
 .topbar {
   display: flex;
