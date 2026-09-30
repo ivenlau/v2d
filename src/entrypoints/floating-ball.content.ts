@@ -64,15 +64,16 @@ export default defineContentScript({
         width: ${BALL_SIZE}px;
         height: ${BALL_SIZE}px;
         border-radius: 50%;
-        background: linear-gradient(135deg, #6366f1, #4338ca);
-        color: #fff;
-        border: 2px solid rgba(255,255,255,.85);
-        box-shadow: 0 4px 14px rgba(0,0,0,.28);
+        /* design/style.md：实心墨色盘（系统的主操作语言），细发丝环隔离任意底色页面 */
+        background: #0a0a0a;
+        color: #fafafa;
+        border: 1px solid rgba(255,255,255,.22);
+        box-shadow: 0 0 0 1px rgba(23,23,23,.06), 0 4px 16px rgba(0,0,0,.18);
         display: flex;
         align-items: center;
         justify-content: center;
-        font: 700 11px/1 system-ui, sans-serif;
-        letter-spacing: .3px;
+        font: 600 10px/1 "Geist", "Inter", ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: .06em;
         cursor: pointer;
         user-select: none;
         -webkit-user-select: none;
@@ -82,10 +83,10 @@ export default defineContentScript({
         position: fixed;
         z-index: 2147483647;
         height: min(${PANEL_H}px, 82vh);
-        border-radius: 12px;
+        border-radius: 24px;
         overflow: hidden;
-        box-shadow: 0 10px 40px rgba(0,0,0,.4);
-        border: 1px solid rgba(0,0,0,.15);
+        box-shadow: 0 0 0 1px rgba(23,23,23,.05), 0 12px 40px rgba(0,0,0,.18);
+        border: 1px solid #e5e5e5;
         display: none;
       }
       .panel-wrap.open { display: block; }

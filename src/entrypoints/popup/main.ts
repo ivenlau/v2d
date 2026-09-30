@@ -7,7 +7,7 @@ import '@/entrypoints/popup/popup.css'
 import { pingBackground, send } from '@/core/messages'
 import { hostInBlacklist, scoreCandidate } from '@/core/sniffer/patterns'
 import { humanizeError } from '@/core/humanize'
-import type { MediaCandidate } from '@/core/types'
+import type { HlsVariant, MediaCandidate } from '@/core/types'
 import { loadSettings, saveSettings } from '@/core/settings'
 
 const KIND_LABEL: Record<string, string> = {
@@ -24,6 +24,40 @@ let tabUrl = ''
 let tabTitle = ''
 /** 115 转存是否已启用（§9.5：未启用时转存入口完全不可见，只留设置引导条） */
 let v115Enabled = false
+
+/** 用户重命名（popup 内编辑）：候选 id → 自定义文件名（后台再清洗并补扩展名） */
+const renames = new Map<string, string>()
+
+const ICON_VIDEO =
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>'
+const ICON_PENCIL =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>'
+const ICON_CARET =
+  '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>'
+
+/** 可预览直链：file 类 + 视频扩展名/mime（HLS/DASH 无法直接出帧，显示占位块） */
+const VIDEO_EXT = /\.(mp4|webm|m4v|ogv|mov)([?#]|$)/i
+function previewable(c: MediaCandidate): boolean {
+  return (
+    c.kind === 'file' &&
+    !c.probeError &&
+    (VIDEO_EXT.test(c.url) || (c.mime?.startsWith('video/') ?? false))
+  )
+}
+
+function effectiveName(c: MediaCandidate): string {
+  return renames.get(c.id) ?? c.fileName ?? c.url.slice(0, 80)
+}
+
+/** 清晰度选项的展示名（quality > resolution > name > 码率） */
+function variantLabel(v: HlsVariant): string {
+  return (
+    v.quality ??
+    v.resolution ??
+    v.name ??
+    (v.bandwidth ? Math.round(v.bandwidth / 1000) + 'kbps' : '未知清晰度')
+  )
+}
 
 function fmtSize(bytes?: number): string {
   if (!bytes) return ''
@@ -59,11 +93,24 @@ function metaLine(c: MediaCandidate): string {
     if (c.durationSec) parts.push(fmtDuration(c.durationSec))
     if (c.live) parts.push('直播流')
     if (c.encrypted) parts.push('AES 加密')
-  } else {
-    parts.push(c.size ? fmtSize(c.size) : '大小未知')
+  } else if (!c.size) {
+    // 大小已知时直接以水印形式盖在缩略图左下角，不重复占元信息行
+    parts.push('大小未知')
   }
   if (c.probeError) parts.push(`探测失败(${c.probeError})`)
   return parts.join(' · ')
+}
+
+/** 占位缩略块：视频图标 + 类型短标 */
+function makePh(c: MediaCandidate): HTMLElement {
+  const ph = document.createElement('div')
+  ph.className = 'ph'
+  ph.innerHTML = ICON_VIDEO
+  const label = document.createElement('span')
+  label.className = 'ph-label'
+  label.textContent = KIND_LABEL[c.kind] ?? c.kind
+  ph.appendChild(label)
+  return ph
 }
 
 function render(list: MediaCandidate[]): void {
@@ -71,36 +118,183 @@ function render(list: MediaCandidate[]): void {
   container.querySelectorAll('.item').forEach((el) => el.remove())
   $('#count').textContent = list.length ? `共 ${list.length} 个候选` : ''
 
+  let thumbCount = 0
   for (const c of list) {
     const item = document.createElement('div')
     item.className = 'item'
     item.dataset.id = c.id
 
+    // 左侧 16:9 预览：可预览直链用 <video> 元数据帧（防盗链失败降级占位块），其余直接占位
+    const thumb = document.createElement('div')
+    thumb.className = 'thumb'
+    if (previewable(c) && thumbCount < 8) {
+      thumbCount++
+      const v = document.createElement('video')
+      v.muted = true
+      v.preload = 'metadata'
+      v.disablePictureInPicture = true
+      // #t=0.5 让浏览器定位到近起始帧出画面；已有 fragment 的 URL 不重复追加
+      v.src = c.url.includes('#') ? c.url : `${c.url}#t=0.5`
+      v.addEventListener(
+        'error',
+        () => {
+          v.remove()
+          thumb.appendChild(makePh(c))
+        },
+        { once: true },
+      )
+      thumb.appendChild(v)
+    } else {
+      thumb.appendChild(makePh(c))
+    }
+    // 视频大小：黑底白字水印盖在缩略图左下角
+    if (c.size) {
+      const tag = document.createElement('span')
+      tag.className = 'size-tag'
+      tag.textContent = fmtSize(c.size)
+      thumb.appendChild(tag)
+    }
+
+    const content = document.createElement('div')
+    content.className = 'item-content'
+
     const head = document.createElement('div')
     head.className = 'item-head'
     const badge = document.createElement('span')
-    badge.className = `badge ${c.kind}`
+    badge.className = 'badge'
     badge.textContent = KIND_LABEL[c.kind] ?? c.kind
     const name = document.createElement('span')
     name.className = 'name'
     name.title = c.url
-    name.textContent = c.fileName ?? c.url.slice(0, 80)
-    head.append(badge, name)
-
-    const meta = document.createElement('div')
-    meta.className = 'meta'
-    meta.innerHTML = metaLine(c).replace(/探测失败\((.*?)\)/, '<span class="err">探测失败($1)</span>')
+    name.textContent = effectiveName(c)
+    const renameBtn = document.createElement('button')
+    renameBtn.className = 'rename-btn'
+    renameBtn.title = '重命名'
+    renameBtn.innerHTML = ICON_PENCIL
+    renameBtn.addEventListener('click', () => startRename(c, item))
+    head.append(badge, name, renameBtn)
 
     const actions = document.createElement('div')
     actions.className = 'item-actions'
     appendActions(actions, c, item)
 
-    item.append(head, meta, actions)
+    content.append(head)
+    // 元信息可能为空（大小已挪到缩略图水印且无探测异常）
+    const metaText = metaLine(c)
+    if (metaText) {
+      const meta = document.createElement('div')
+      meta.className = 'meta'
+      meta.innerHTML = metaText.replace(/探测失败\((.*?)\)/, '<span class="err">探测失败($1)</span>')
+      content.append(meta)
+    }
+    content.append(actions)
+    item.append(thumb, content)
     container.appendChild(item)
   }
 
   $('#empty').style.display = list.length ? 'none' : ''
 }
+
+/** 内联重命名：名字 span ⇄ 输入框；Enter/失焦保存（客户端先清洗非法字符），Esc 取消 */
+function startRename(c: MediaCandidate, item: HTMLElement): void {
+  const nameSpan = item.querySelector('.name')
+  if (!(nameSpan instanceof HTMLElement) || item.querySelector('.rename-input')) return
+  const input = document.createElement('input')
+  input.className = 'rename-input'
+  input.maxLength = 200
+  input.spellcheck = false
+  input.value = effectiveName(c)
+  nameSpan.replaceWith(input)
+  input.focus()
+  input.select()
+  let done = false
+  const finish = (commit: boolean): void => {
+    if (done) return
+    done = true
+    if (commit) {
+      const v = input.value
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 180)
+      if (v) renames.set(c.id, v)
+      else renames.delete(c.id)
+    }
+    const span = document.createElement('span')
+    span.className = 'name'
+    span.title = c.url
+    span.textContent = effectiveName(c)
+    input.replaceWith(span)
+  }
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true)
+    else if (e.key === 'Escape') finish(false)
+  })
+  input.addEventListener('blur', () => finish(true))
+}
+
+/** 复制链接：clipboard API 优先，受限环境（iframe 嵌入面板）降级 execCommand */
+async function copyLink(c: MediaCandidate): Promise<void> {
+  const ok = await (async (): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(c.url)
+      return true
+    } catch {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = c.url
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        const done = document.execCommand('copy')
+        ta.remove()
+        return done
+      } catch {
+        return false
+      }
+    }
+  })()
+  toast(ok ? '链接已复制' : '复制失败')
+}
+
+/** 直链本地保存（浏览器直下，不经合并队列） */
+async function downloadFile(c: MediaCandidate, btn: HTMLButtonElement): Promise<void> {
+  btn.disabled = true
+  const r = await send<{ ok: boolean; reason?: string; error?: string }>({
+    type: 'download',
+    tabId,
+    id: c.id,
+    pageTitle: tabTitle,
+    fileName: renames.get(c.id),
+  })
+  if (r?.ok) toast('已开始下载')
+  else toast(r?.reason ?? r?.error ?? '下载失败')
+  btn.disabled = false
+}
+
+// ── split 按钮的下拉菜单（分辨率菜单 / 操作菜单互斥；点击别处 / Esc 关闭） ──
+let openMenuEl: HTMLElement | null = null
+function closeSplitMenu(): void {
+  openMenuEl?.classList.remove('open')
+  openMenuEl = null
+}
+function toggleSplitMenu(menu: HTMLElement, anchor: HTMLElement, list: HTMLElement): void {
+  if (openMenuEl === menu) {
+    closeSplitMenu()
+    return
+  }
+  closeSplitMenu()
+  // 靠近列表底部时向上展开，避免被滚动容器裁剪
+  const nearBottom = list.getBoundingClientRect().bottom - anchor.getBoundingClientRect().bottom < 150
+  menu.classList.toggle('up', nearBottom)
+  menu.classList.add('open')
+  openMenuEl = menu
+}
+document.addEventListener('click', () => closeSplitMenu())
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSplitMenu()
+})
 
 function appendActions(actions: HTMLElement, c: MediaCandidate, item: HTMLElement): void {
   if (c.kind === 'blob') {
@@ -110,72 +304,97 @@ function appendActions(actions: HTMLElement, c: MediaCandidate, item: HTMLElemen
     actions.appendChild(note)
     return
   }
-  if (c.kind === 'hls' || c.kind === 'dash') {
-    // 默认用最高码率；展开可逐清晰度选择（dash 的 variants 由站点探针预填）
-    const best = c.variants?.[0]?.url
-    const dl = document.createElement('button')
-    dl.className = 'btn primary'
-    dl.textContent = '⬇ 存本地'
-    dl.disabled = !!c.probeError || !!c.live
-    dl.addEventListener('click', () => void transferHls(c, 'local', best, dl))
-    actions.appendChild(dl)
-    if (v115Enabled) {
-      const up = document.createElement('button')
-      up.className = 'btn'
-      up.textContent = '☁ 转存115'
-      up.disabled = !!c.probeError || !!c.live
-      up.addEventListener('click', () => void transferHls(c, 'cloud', best, up))
-      actions.appendChild(up)
-    }
-    if (c.live) {
-      const note = document.createElement('span')
-      note.className = 'note'
-      note.textContent = '直播流不支持'
-      actions.appendChild(note)
-    }
-    const expand = document.createElement('button')
-    expand.className = 'btn'
-    expand.textContent = c.variants?.length ? '清晰度' : '解析'
-    expand.addEventListener('click', () => void expandHls(c, item))
-    actions.appendChild(expand)
-    return
-  }
-  const dl = document.createElement('button')
-  dl.className = 'btn primary'
-  dl.textContent = '⬇ 存本地'
-  dl.disabled = !!c.probeError
-  dl.addEventListener('click', async () => {
-    dl.disabled = true
-    const r = await send<{ ok: boolean; reason?: string; error?: string }>({
-      type: 'download',
-      tabId,
-      id: c.id,
-      pageTitle: tabTitle,
-    })
-    if (r?.ok) toast('已开始下载')
-    else toast(r?.reason ?? r?.error ?? '下载失败')
-    dl.disabled = false
-  })
-  actions.appendChild(dl)
 
-  if (v115Enabled) {
-    const up = document.createElement('button')
-    up.className = 'btn'
-    up.textContent = '☁ 转存115'
-    up.disabled = !!c.probeError
-    up.addEventListener('click', async () => {
-      up.disabled = true
-      const r = await send<{ ok: boolean; channel?: string; reason?: string; error?: string }>({
-        type: 'transfer115',
-        tabId,
-        id: c.id,
-        pageTitle: tabTitle,
-      })
-      if (r?.ok) toast(r.channel === 'hls-merge' ? '已加入合并转存队列' : '已加入转存队列')
-      else toast(r?.reason ?? r?.error ?? '提交失败')
-      up.disabled = false
+  // 按钮组：[分辨率 ▾]（有 variants 时）+ [下载] + [▾ 更多]（复制链接 / 转存115）
+  const isStream = c.kind === 'hls' || c.kind === 'dash'
+  const variants = c.variants ?? []
+  let selected: HlsVariant | undefined = variants[0]
+  const split = document.createElement('div')
+  split.className = 'split'
+
+  if (variants.length > 1) {
+    split.classList.add('has-quality')
+    const qBtn = document.createElement('button')
+    qBtn.className = 'split-quality'
+    qBtn.title = '选择清晰度'
+    qBtn.disabled = !!c.probeError
+    const qLabel = document.createElement('span')
+    qLabel.textContent = variantLabel(selected)
+    const qCaret = document.createElement('span')
+    qCaret.innerHTML = ICON_CARET
+    qBtn.append(qLabel, qCaret)
+
+    const qMenu = document.createElement('div')
+    qMenu.className = 'menu q-menu'
+    qBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      // 每次展开重建，保证 ✓ 选中态同步
+      qMenu.innerHTML = ''
+      for (const v of variants) {
+        const b = document.createElement('button')
+        b.className = 'menu-item'
+        b.textContent = (v === selected ? '✓ ' : '') + variantLabel(v)
+        b.addEventListener('click', () => {
+          selected = v
+          qLabel.textContent = variantLabel(selected)
+          closeSplitMenu()
+        })
+        qMenu.appendChild(b)
+      }
+      toggleSplitMenu(qMenu, qBtn, $('#list'))
     })
-    actions.appendChild(up)
+    split.appendChild(qBtn)
+  }
+
+  const main = document.createElement('button')
+  main.className = 'split-main'
+  main.textContent = '下载'
+  main.disabled = !!c.probeError || !!c.live
+  main.addEventListener('click', () =>
+    void (isStream
+      ? transferHls(c, 'local', selected?.url, main, renames.get(c.id))
+      : downloadFile(c, main)),
+  )
+
+  const caret = document.createElement('button')
+  caret.className = 'split-caret'
+  caret.title = '更多操作'
+  caret.innerHTML = ICON_CARET
+  caret.addEventListener('click', (e) => {
+    e.stopPropagation()
+    toggleSplitMenu(menu, caret, $('#list'))
+  })
+
+  const menu = document.createElement('div')
+  menu.className = 'menu'
+  const menuItem = (label: string, onClick: (b: HTMLButtonElement) => void): HTMLButtonElement => {
+    const b = document.createElement('button')
+    b.className = 'menu-item'
+    b.textContent = label
+    b.addEventListener('click', () => onClick(b))
+    return b
+  }
+  menu.appendChild(menuItem('复制链接', () => void copyLink(c)))
+  // 未预填清晰度的 HLS：保留解析入口（拉取 master playlist 展示轨信息）
+  if (isStream && !variants.length) {
+    menu.appendChild(menuItem('解析信息', () => void expandHls(c, item)))
+  }
+  if (v115Enabled) {
+    const up = menuItem('转存115', (b) =>
+      void transferHls(c, 'cloud', selected?.url, b, renames.get(c.id)),
+    )
+    up.disabled = !!c.probeError || !!c.live
+    menu.appendChild(up)
+  }
+
+  split.append(main, caret, menu)
+  actions.appendChild(split)
+
+  if (c.live) {
+    const note = document.createElement('span')
+    note.className = 'note'
+    note.textContent = '直播流不支持'
+    actions.appendChild(note)
   }
 }
 
@@ -185,12 +404,13 @@ async function transferHls(
   dest: 'local' | 'cloud',
   variantUrl: string | undefined,
   btn: HTMLButtonElement,
+  fileName?: string,
 ): Promise<void> {
   btn.disabled = true
   const req =
     dest === 'local'
-      ? { type: 'download' as const, tabId, id: c.id, variantUrl, pageTitle: tabTitle }
-      : { type: 'transfer115' as const, tabId, id: c.id, variantUrl, pageTitle: tabTitle }
+      ? { type: 'download' as const, tabId, id: c.id, variantUrl, pageTitle: tabTitle, fileName }
+      : { type: 'transfer115' as const, tabId, id: c.id, variantUrl, pageTitle: tabTitle, fileName }
   const r = await send<{ ok: boolean; channel?: string; reason?: string; error?: string }>(req)
   if (r?.ok) {
     toast(dest === 'local' ? '已加入合并下载队列' : '已加入转存队列')
@@ -203,24 +423,24 @@ async function transferHls(
 
 function variantRow(
   cand: MediaCandidate,
-  v: { url: string; quality?: string; resolution?: string; name?: string; bandwidth?: number },
+  v: HlsVariant,
 ): HTMLElement {
   const row = document.createElement('div')
   row.className = 'variant'
-  const label = v.quality ?? v.resolution ?? v.name ?? (v.bandwidth ? `${Math.round(v.bandwidth / 1000)}kbps` : '未知清晰度')
-  row.innerHTML = `<span class="badge file" style="background:var(--accent-soft);color:var(--accent)">${label}</span><span class="name">${v.bandwidth ? Math.round(v.bandwidth / 1000) + 'kbps' : ''}</span>`
+  const label = variantLabel(v)
+  row.innerHTML = `<span class="badge">${label}</span><span class="name">${v.bandwidth ? Math.round(v.bandwidth / 1000) + 'kbps' : ''}</span>`
   const dl = document.createElement('button')
   dl.className = 'btn'
   dl.textContent = '⬇'
   dl.title = '合并下载为 MP4'
-  dl.addEventListener('click', () => void transferHls(cand, 'local', v.url, dl))
+  dl.addEventListener('click', () => void transferHls(cand, 'local', v.url, dl, renames.get(cand.id)))
   row.appendChild(dl)
   if (v115Enabled) {
     const up = document.createElement('button')
     up.className = 'btn'
     up.textContent = '☁'
     up.title = '合并转存到 115'
-    up.addEventListener('click', () => void transferHls(cand, 'cloud', v.url, up))
+    up.addEventListener('click', () => void transferHls(cand, 'cloud', v.url, up, renames.get(cand.id)))
     row.appendChild(up)
   }
   return row
@@ -416,9 +636,15 @@ interface TaskView {
   instant?: boolean
 }
 
-/** Safari：直接读 OPFS 产物生成下载（不经宿主页面——iOS 会丢弃后台标签页导致链路断裂） */
-async function saveStaged(t: TaskView, btn: HTMLButtonElement): Promise<void> {
-  btn.disabled = true
+const IS_IOS = /iP(hone|od|ad)/.test(navigator.userAgent)
+
+/** 读 OPFS 待保存产物并触发 <a download>（扩展页面内，文件名受控）。
+ *  iOS：popup 内 blob 下载不可靠（WebKitBlobResource 1）→ 跳转传输管理页走 Web Share。 */
+async function saveStagedTask(t: TaskView): Promise<void> {
+  if (IS_IOS) {
+    await chrome.tabs.create({ url: chrome.runtime.getURL(`manager.html?save=${t.id}`) })
+    return
+  }
   try {
     const root = await navigator.storage.getDirectory()
     const dir = await root.getDirectoryHandle('staging')
@@ -438,7 +664,6 @@ async function saveStaged(t: TaskView, btn: HTMLButtonElement): Promise<void> {
     await renderTasks()
   } catch (e) {
     toast(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
-    btn.disabled = false
   }
 }
 
@@ -448,6 +673,7 @@ const TASK_STATE_LABEL: Record<string, string> = {
   'offline-polling': '115 转存中',
   downloading: '下载中',
   hashing: '校验中',
+  transmuxing: '合成中',
   checking: '秒传检测中',
   uploading: '上传中',
   saving: '保存本地',
@@ -507,14 +733,14 @@ async function renderTasks(): Promise<void> {
     if (t.state === 'paused') mini('▶ 继续', 'transferResume', '从断点继续')
     if (t.state === 'failed' || t.state === 'cancelled') mini('↻ 重试', 'transferRetry', '重试（保留断点）')
     if (t.state === 'staged') {
-      // iOS：popup 内 blob 下载不可靠 → 跳转传输管理页自动保存
+      // 合并完成 → 等待用户点击保存（<a download>，文件名受控；SW 的 downloads API
+      // 对 blob URL 会忽略 filename 落成随机名，故不自动保存）
+      // iOS：popup 内 blob 下载不可靠 → 跳转传输管理页走 Web Share
       const save = document.createElement('button')
       save.className = 'mini-btn'
       save.textContent = '⬇ 保存到文件'
-      save.title = '在传输管理页保存到「文件」App'
-      save.addEventListener('click', () => {
-        void chrome.tabs.create({ url: chrome.runtime.getURL(`manager.html?save=${t.id}`) })
-      })
+      save.title = IS_IOS ? '在传输管理页保存到「文件」App' : '保存到本地'
+      save.addEventListener('click', () => void saveStagedTask(t))
       actions.appendChild(save)
     }
     if (actions.children.length) row.appendChild(actions)

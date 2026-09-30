@@ -5,11 +5,27 @@ export type BgRequest =
   | { type: 'clear'; tabId: number }
   | { type: 'probe'; tabId: number; id: string }
   | { type: 'probeMany'; tabId: number; ids: string[] }
-  | { type: 'download'; tabId: number; id: string; variantUrl?: string; pageTitle?: string }
+  | {
+      type: 'download'
+      tabId: number
+      id: string
+      variantUrl?: string
+      pageTitle?: string
+      /** 用户重命名（popup 内编辑）；缺省走自动命名 */
+      fileName?: string
+    }
   | { type: 'hlsInfo'; tabId: number; id: string }
   | { type: 'scanDom'; tabId: number }
   | { type: 'siteProbe'; tabId: number }
-  | { type: 'transfer115'; tabId: number; id: string; pageTitle?: string; variantUrl?: string }
+  | {
+      type: 'transfer115'
+      tabId: number
+      id: string
+      pageTitle?: string
+      variantUrl?: string
+      /** 用户重命名（popup 内编辑）；缺省走自动命名 */
+      fileName?: string
+    }
   | { type: 'transferList' }
   | { type: 'transferCancel'; taskId: string }
   | { type: 'transferPause'; taskId: string }

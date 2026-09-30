@@ -35,6 +35,7 @@ const STATE_LABEL: Record<string, string> = {
   'offline-polling': '115 转存中',
   downloading: '下载中',
   hashing: '校验中',
+  transmuxing: '合成中',
   checking: '秒传检测中',
   uploading: '上传中',
   saving: '保存本地',
@@ -265,11 +266,11 @@ $('#offline-submit').addEventListener('click', async () => {
     })
     if (r?.ok) {
       inputEl.value = ''
-      msgEl.style.color = 'var(--ok)'
+      msgEl.style.color = 'var(--ink)'
       msgEl.textContent = '已提交，任务已加入下方队列'
       await refresh()
     } else {
-      msgEl.style.color = 'var(--err)'
+      msgEl.style.color = 'var(--ember)'
       msgEl.textContent = r?.reason ?? r?.error ?? '提交失败'
     }
   } finally {
@@ -278,7 +279,7 @@ $('#offline-submit').addEventListener('click', async () => {
 })
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'v2d/task-event' || msg?.type === 'v2d/task-blob') void refresh()
+  if (msg?.type === 'v2d/task-event') void refresh()
   return false
 })
 

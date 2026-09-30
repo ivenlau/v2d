@@ -93,7 +93,9 @@ function setChip(text: string, ok = true): void {
   const chip = $('#v115-state')
   chip.classList.toggle('hidden', !text)
   chip.textContent = text
-  chip.style.background = ok ? 'var(--ok)' : 'var(--warn)'
+  // 单色体系：认证正常=实心墨色（唯一高强调），异常=灰
+  chip.style.background = ok ? 'var(--solid-bg)' : 'var(--badge-bg)'
+  chip.style.color = ok ? 'var(--solid-fg)' : 'var(--muted)'
 }
 
 async function showActiveOrAuth(): Promise<void> {

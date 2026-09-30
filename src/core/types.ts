@@ -7,6 +7,8 @@ export type MediaOrigin = 'network' | 'dom' | 'mse'
 
 export interface HlsVariant {
   url: string
+  /** 清晰度短名（站点探针预填，如 1080P/720P） */
+  quality?: string
   bandwidth?: number
   resolution?: string
   name?: string
