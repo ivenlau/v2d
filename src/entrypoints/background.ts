@@ -21,7 +21,7 @@ import {
 } from '@/core/sniffer/store'
 import { probeUrl } from '@/core/probe'
 import { parseM3U8 } from '@/core/m3u8'
-import { buildFileName } from '@/core/name'
+import { buildFileName, sanitizeFileName } from '@/core/name'
 import { loadSettings } from '@/core/settings'
 import type { MediaCandidate, Settings } from '@/core/types'
 import type { BgRequest } from '@/core/messages'
@@ -35,8 +35,10 @@ import {
   deleteTask,
   enqueueOffline,
   enqueueTransfer,
+  finishDownloadTask,
   handleTaskBlob,
   invalidateTaskCache,
+  lookupBlobName,
   listTasks,
   markTaskSaved,
   pauseTask,
@@ -44,8 +46,6 @@ import {
   resumeTask,
   retryTask,
 } from '@/background/transfer'
-
-const BADGE_COLOR = '#4f46e5'
 
 // ── 设置缓存（storage.onChanged 失效） ──────────────────────────────────
 let settingsCache: Settings | null = null
@@ -205,11 +205,63 @@ async function scanDom(tabId: number): Promise<number> {
   return all.length
 }
 
+// ── 站点探针（M5）：弹窗打开时手动触发；DASH 分轨出现时后台自动触发（实时角标） ──
+const autoProbeAt = new Map<number, number>() // tabId → 上次自动探测时间（10s 限频）
+
+/** 站点探针：黑名单/注册表校验 → 探测 → 去重入库 → 角标 */
+async function runSiteProbe(tabId: number): Promise<boolean> {
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    const host = tab.url ? new URL(tab.url).hostname : ''
+    const { blacklist } = await getSettings()
+    if (!host || hostInBlacklist(host, blacklist)) return false
+    const probe = SITE_PROBES.find((p) => p.hostPattern.test(host))
+    if (!probe) return false
+    const cands = await probe.run(tabId)
+    const newCands: MediaCandidate[] = []
+    for (const c of cands) {
+      if (!markSeen(tabId, c.id)) {
+        await updateCandidate(tabId, c.id, {
+          variants: c.variants,
+          dashAudioUrl: c.dashAudioUrl,
+        })
+        continue
+      }
+      newCands.push(c)
+    }
+    if (newCands.length) {
+      const all = await addCandidates(tabId, newCands)
+      await updateBadge(tabId, all.length)
+    }
+    return cands.length > 0
+  } catch {
+    return false
+  }
+}
+
+/** DASH 分轨/清单请求出现 → 自动触发站点探针（每标签页 10s 限频） */
+async function maybeAutoProbe(tabId: number): Promise<void> {
+  if (typeof chrome.scripting === 'undefined') return // 无 scripting（部分 Safari）跳过
+  const now = Date.now()
+  if (now - (autoProbeAt.get(tabId) ?? 0) < 10_000) return
+  autoProbeAt.set(tabId, now)
+  await runSiteProbe(tabId)
+}
+
+/** 用户重命名清洗：去非法字符；未带扩展名时补上（大小写不敏感防重复后缀） */
+function applyCustomName(raw: string | undefined, ext: string): string | undefined {
+  const name = sanitizeFileName(raw ?? '')
+  if (!name) return undefined
+  const e = ext.replace(/^\./, '')
+  return name.toLowerCase().endsWith('.' + e.toLowerCase()) ? name : `${name}.${e}`
+}
+
 // ── 下载 ───────────────────────────────────────────────────────────────
 async function download(
   cand: MediaCandidate,
   variantUrl?: string,
   pageTitle?: string,
+  customName?: string,
 ): Promise<{ ok: boolean; reason?: string; downloadId?: number }> {
   if (cand.kind === 'blob') {
     return { ok: false, reason: '页面内嵌流（blob:）暂不支持直接下载，深捕获开发中' }
@@ -219,7 +271,13 @@ async function download(
     return { ok: false, reason: 'HLS/DASH 分段合并下载将在后续版本支持' }
   }
   const rawUrl = variantUrl ?? cand.url
-  const fileName = buildFileName({ title: pageTitle, url: rawUrl, ext: urlExt(rawUrl) || 'mp4' })
+  // 防呆：存量候选里可能有 .m4s 直链——分轨单文件不可播放（无音轨），引导走 DASH 候选
+  if (urlExt(rawUrl) === 'm4s') {
+    return { ok: false, reason: 'DASH 分轨（m4s）不能单独下载，请使用带清晰度下拉的 DASH 候选（自动合并音视频）' }
+  }
+  const fileName =
+    applyCustomName(customName, urlExt(rawUrl) || 'mp4') ??
+    buildFileName({ title: pageTitle, url: rawUrl, ext: urlExt(rawUrl) || 'mp4' })
   try {
     const downloadId = await chrome.downloads.download({
       url: rawUrl,
@@ -264,10 +322,12 @@ async function handle(req: BgRequest): Promise<unknown> {
         const task = await enqueueTransfer(cand, settings.v115, req.pageTitle, {
           dest: 'local',
           variantUrl: req.variantUrl,
+          // 合并产物容器固定 mp4：不能沿用清单/分段的 .m3u8/.m4s 扩展名
+          fileName: applyCustomName(req.fileName, 'mp4'),
         })
         return { ok: true, queued: true, taskId: task.id }
       }
-      return download(cand, req.variantUrl, req.pageTitle)
+      return download(cand, req.variantUrl, req.pageTitle, req.fileName)
     }
     case 'hlsInfo': {
       const cand = await getCandidate(req.tabId, req.id)
@@ -282,33 +342,10 @@ async function handle(req: BgRequest): Promise<unknown> {
       }
     }
     case 'siteProbe': {
-      // 站点适配层入口（M5）：注册表分发；失败静默（popup 不受影响）
+      // 站点适配层入口（M5）：失败静默（popup 不受影响）
       try {
-        const tab = await chrome.tabs.get(req.tabId)
-        const host = tab.url ? new URL(tab.url).hostname : ''
-        const { blacklist } = await getSettings()
-        if (!host || hostInBlacklist(host, blacklist)) return { ok: false }
-        const probe = SITE_PROBES.find((p) => p.hostPattern.test(host))
-        if (!probe) return { ok: false }
-        const cands = await probe.run(req.tabId)
-        let added = false
-        const newCands: MediaCandidate[] = []
-        for (const c of cands) {
-          if (!markSeen(req.tabId, c.id)) {
-            await updateCandidate(req.tabId, c.id, {
-              variants: c.variants,
-              dashAudioUrl: c.dashAudioUrl,
-            })
-            continue
-          }
-          added = true
-          newCands.push(c)
-        }
-        if (newCands.length) {
-          const all = await addCandidates(req.tabId, newCands)
-          await updateBadge(req.tabId, all.length)
-        }
-        return { ok: true, count: cands.length, added }
+        const ok = await runSiteProbe(req.tabId)
+        return { ok }
       } catch (e) {
         return { error: e instanceof Error ? e.message : String(e) }
       }
@@ -326,6 +363,7 @@ async function handle(req: BgRequest): Promise<unknown> {
       const task = await enqueueTransfer(cand, settings.v115, req.pageTitle, {
         dest: 'cloud',
         variantUrl: req.variantUrl,
+        fileName: applyCustomName(req.fileName, 'mp4'),
       })
       return {
         ok: true,
@@ -366,7 +404,13 @@ export default defineBackground(() => {
   // MV2（Safari 目标）下 action API 挂在 browserAction 命名空间
   const actionApi = chrome.action ?? (chrome as unknown as { browserAction: typeof chrome.action }).browserAction
 
-  actionApi.setBadgeBackgroundColor({ color: BADGE_COLOR })
+  // 数字角标：红底（ember）白字，发现视频时显示候选数
+  actionApi.setBadgeBackgroundColor({ color: '#e7000b' })
+  try {
+    ;(actionApi as typeof chrome.action).setBadgeTextColor?.({ color: '#ffffff' })
+  } catch {
+    /* 旧内核 / Safari MV2 无此 API——对比度由浏览器自动选择 */
+  }
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local') {
@@ -380,6 +424,7 @@ export default defineBackground(() => {
     (details) => {
       // 硬导航即重置该标签页（软导航/SPA 不触发 main_frame，候选保留）
       if (details.type === 'main_frame' && details.tabId >= 0) {
+        autoProbeAt.delete(details.tabId)
         void resetTab(details.tabId)
       }
       return undefined // 观察式，永不阻断
@@ -394,6 +439,13 @@ export default defineBackground(() => {
       const mime = headers.find((h) => h.name.toLowerCase() === 'content-type')?.value
       const lenHeader = headers.find((h) => h.name.toLowerCase() === 'content-length')?.value
       const contentLength = lenHeader ? Number(lenHeader) || undefined : undefined
+
+      // DASH 分轨/清单请求：不注册直链候选，但作为「该站有视频」信号自动触发站点探针
+      // （实时角标 + 弹窗打开时 DASH 候选即已就绪）
+      const reqExt = urlExt(details.url)
+      if (reqExt === 'm4s' || reqExt === 'mpd') {
+        void maybeAutoProbe(details.tabId)
+      }
 
       // 廉价预判：分类不命中直接返回（绝大多数请求在这里被丢弃）
       const cls = classifyRequest(details.url, mime, contentLength)
@@ -454,9 +506,6 @@ export default defineBackground(() => {
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'v2d/task-event') {
       void applyTaskEvent(msg)
-    } else if (msg?.type === 'v2d/task-blob') {
-      // HLS 本地保存：offscreen 已建好 blob URL，由 SW 发起原生下载并在完成后清理
-      void handleTaskBlob(msg.taskId, msg.blobUrl, msg.fileName)
     } else if (msg?.type === 'v2d/task-staged-ready') {
       // Safari：合并完成进入待保存态（用户在管理页/弹窗点「保存到文件」）
       void applyStagedReady(msg.taskId, msg.fileName ?? '', msg.size ?? 0)
@@ -476,6 +525,48 @@ export default defineBackground(() => {
 
   // SW 冷启动：恢复被杀期间卡住的任务并继续泵
   void recoverStuckTasks().catch((e) => console.warn('[V2D] 任务恢复失败', e))
+
+  // blob 下载文件名覆写：SW 发起的 blob: 下载 filename 会被 Chromium 忽略（UUID 名），
+  // 在文件名决议阶段用任务名覆写；缺失此 API 的环境由 MIME 兜底（.mp4）
+  try {
+    chrome.downloads.onDeterminingFilename?.addListener((item, suggest) => {
+      const name = lookupBlobName(item.url)
+      if (name) suggest({ filename: `V2D/${name}`, conflictAction: 'uniquify' })
+      else suggest()
+    })
+  } catch {
+    /* 旧内核/Safari 无此 API */
+  }
+
+  // 保存收口兜底：handleTaskBlob 的轮询快路径被 SW 休眠打断时，
+  // onChanged 事件会唤醒 SW，凭任务上持久化的 downloadId 幂等收口
+  chrome.downloads.onChanged.addListener((delta) => {
+    if (delta.state?.current === 'complete') void finishDownloadTask(delta.id, null)
+    else if (delta.state?.current === 'interrupted')
+      void finishDownloadTask(delta.id, delta.error?.current ?? '下载中断')
+  })
+
+  // blob 下载文件名覆写：SW 发起的 blob: 下载会忽略 downloads.download 的 filename
+  // （落成随机 UUID 名），在文件名决议阶段用任务名覆写；缺失此 API 的环境由 MIME 兜底 .mp4
+
+  // 存量候选清洗：旧版本曾把 .m4s 分轨 / .mpd 清单注册为「直链」候选——
+  // storage.session 跨扩展重载存活，不清除会一直误导下载（下到无音轨的单轨文件）
+  void (async () => {
+    try {
+      const all = await chrome.storage.session.get(null)
+      for (const [key, val] of Object.entries(all)) {
+        if (!key.startsWith('cand:')) continue
+        const list = val as MediaCandidate[]
+        const kept = list.filter((c) => {
+          const ext = urlExt(c.url)
+          return ext !== 'm4s' && ext !== 'mpd'
+        })
+        if (kept.length !== list.length) await chrome.storage.session.set({ [key]: kept })
+      }
+    } catch {
+      /* storage.session 不可用（部分 Safari 版本）——跳过 */
+    }
+  })()
 
   // Safari/iOS：轮询壳 App 内嵌任务页写入的操作命令（真 App 内嵌桥）
   if (!import.meta.env.CHROME) {

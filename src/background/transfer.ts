@@ -44,6 +44,8 @@ export interface TransferTask {
   /** Safari/iOS：合并产物已就绪，等待用户在管理页点「保存到文件」 */
   stagedFileName?: string
   stagedSize?: number
+  /** Chrome：保存中任务的 chrome.downloads 记录 id（onChanged 收口用，SW 休眠也不丢） */
+  downloadId?: number
   size?: number
   /** downloading：已收字节；offline：percentDone 借用 uploaded 展示 */
   received?: number
@@ -212,11 +214,16 @@ export async function enqueueOffline(url: string, settings: V115Settings): Promi
   return task
 }
 
+/** 合并产物的容器统一是 mp4：清单/分段扩展名（.m3u8/.mpd/.m4s）不允许漏到落盘名 */
+function forceMergeExt(name: string): string {
+  return /\.[a-z0-9]{2,5}$/i.test(name) ? name.replace(/\.[a-z0-9]{2,5}$/i, '.mp4') : `${name}.mp4`
+}
+
 export async function enqueueTransfer(
   cand: MediaCandidate,
   settings: V115Settings,
   pageTitle?: string,
-  opts: { dest: 'cloud' | 'local'; variantUrl?: string } = { dest: 'cloud' },
+  opts: { dest: 'cloud' | 'local'; variantUrl?: string; fileName?: string } = { dest: 'cloud' },
 ): Promise<TransferTask> {
   // hls/dash 候选走合并管线；直链一律浏览器直传（秒传优先）
   const isHls = cand.kind === 'hls'
@@ -227,7 +234,7 @@ export async function enqueueTransfer(
     dest: opts.dest,
     state: 'queued',
     url: cand.url,
-    fileName: cand.fileName ?? 'video.mp4',
+    fileName: forceMergeExt(opts.fileName?.trim() || cand.fileName || 'video.mp4'),
     targetPath: joinTargetPath(settings.targetRoot, cand.url),
     pageTitle,
     variantUrl: opts.variantUrl,
@@ -597,6 +604,9 @@ export async function applyTaskEvent(e: {
     return
   }
   console.log('[V2D] 任务事件', e.taskId, e.state ?? '', e.error ?? '')
+  // staged/saving/done 后不再接受 worker 事件回退状态——
+  // 迟到的下载/校验事件会把「待保存」覆盖回「校验中」，任务就此卡死
+  if (task.state === 'staged' || task.state === 'saving' || task.state === 'done') return
   if (e.state) task.state = e.state
   if (e.received !== undefined) task.received = e.received
   if (e.uploaded !== undefined) task.uploaded = e.uploaded
@@ -623,52 +633,86 @@ export async function applyTaskEvent(e: {
   }
 }
 
-// ── 本地保存交接：offscreen 建好 blob URL 后由 SW 发起原生下载 ──────────
+
+// ── Safari/iOS 本地保存：合并产物就绪 → 用户在管理页点「保存到文件」 ──
+
+// ── 本地保存交接：offscreen 建 blob URL（带 video/mp4 MIME），由 SW 发起原生下载 ──
+
+// SW 发起的 blob: 下载 filename 会被 Chromium 忽略（落成 UUID 名）——
+// 记录 blobUrl → 目标名，由 background 的 onDeterminingFilename 在文件名决议阶段覆写
+const pendingBlobNames = new Map<string, string>()
+
+/** 登记 blob 下载的目标文件名（onDeterminingFilename 覆写用） */
+export function rememberBlobName(blobUrl: string, fileName: string): void {
+  if (pendingBlobNames.size > 100) pendingBlobNames.clear()
+  pendingBlobNames.set(blobUrl, fileName)
+}
+
+/** 查询 blob 下载的目标文件名；非本扩展的下载返回 undefined（走默认命名） */
+export function lookupBlobName(blobUrl: string): string | undefined {
+  return pendingBlobNames.get(blobUrl)
+}
+
 export async function handleTaskBlob(taskId: string, blobUrl: string, fileName: string): Promise<void> {
   const task = (await loadTasks()).find((t) => t.id === taskId)
   if (!task) return
   task.state = 'saving'
   task.fileName = fileName
   await persist(true)
+  let downloadId: number
   try {
-    const downloadId = await chrome.downloads.download({
+    rememberBlobName(blobUrl, fileName)
+    downloadId = await chrome.downloads.download({
       url: blobUrl,
       filename: `V2D/${fileName}`,
       saveAs: false,
     })
-    await waitForDownload(downloadId)
-    task.state = 'done'
-    task.finishedAt = Date.now()
   } catch (e) {
     task.state = 'failed'
     task.error = e instanceof Error ? e.message : String(e)
     task.finishedAt = Date.now()
+    await persist(true)
+    void pump()
+    return
   }
+  // downloadId 持久化 + 收口：SW 休眠会打断快路径轮询，downloads.onChanged（启动注册）兜底。
+  // ⚠️ await 期间 storage.onChanged 可能 invalidateTaskCache（task 成孤儿对象、persist 静默
+  // 不写）——必须重新 find 挂回活缓存再改字段
+  const fresh = (await loadTasks()).find((t) => t.id === taskId)
+  if (fresh) {
+    fresh.downloadId = downloadId
+    await persist(true)
+  }
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await sleep(500)
+    const [rec] = await chrome.downloads.search({ id: downloadId }).catch(() => [])
+    if (!rec) continue
+    if (rec.state === 'complete') return finishDownloadTask(downloadId, null)
+    if (rec.state === 'interrupted') return finishDownloadTask(downloadId, rec.error ?? '下载中断')
+  }
+}
+
+/** 保存收口（轮询快路径 / onChanged 唤醒共用；重复通知幂等） */
+export async function finishDownloadTask(downloadId: number, err: string | null): Promise<void> {
+  const task = (await loadTasks()).find((t) => t.downloadId === downloadId)
+  if (!task || task.state !== 'saving') return
+  if (err) {
+    task.state = 'failed'
+    task.error = err
+  } else {
+    task.state = 'done'
+  }
+  task.finishedAt = Date.now()
   await persist(true)
-  // 释放 offscreen 侧资源（blob URL + 暂存文件）
   try {
-    await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId })
+    await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId: task.id })
   } catch {
     /* offscreen 可能已关闭 */
   }
   void pump()
 }
 
-function waitForDownload(downloadId: number): Promise<void> {
-  return new Promise((resolve) => {
-    const listener = (delta: chrome.downloads.DownloadDelta): void => {
-      if (delta.id !== downloadId) return
-      const state = delta.state?.current
-      if (state === 'complete' || state === 'interrupted') {
-        chrome.downloads.onChanged.removeListener(listener)
-        resolve()
-      }
-    }
-    chrome.downloads.onChanged.addListener(listener)
-  })
-}
-
-// ── Safari/iOS 本地保存：合并产物就绪 → 用户在管理页点「保存到文件」 ──
 export async function applyStagedReady(taskId: string, fileName: string, size: number): Promise<void> {
   const task = (await loadTasks()).find((t) => t.id === taskId)
   if (!task) return

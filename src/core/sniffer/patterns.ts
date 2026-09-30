@@ -41,11 +41,19 @@ export function classifyRequest(
   if (NOISE_RE.test(rawUrl)) return null
 
   const ext = urlExt(rawUrl)
-  if (PLAYLIST_EXTS.has(ext)) return { kind: ext === 'mpd' ? 'dash' : 'hls', ext }
-  if (ext === 'mpd') return { kind: 'dash', ext }
+  // MPD 清单暂不支持解析（无 MPD parser）——不注册为候选，
+  // 避免出现「点下载必然失败」的清单任务（清单不是媒体本体）
+  if (ext === 'mpd') return null
+  // DASH 分轨（fMP4 单轨：无音轨或无视频轨）不是完整媒体，单独下载不可播放——
+  // 不注册直链候选，由站点探针的 DASH 候选负责（合并音视频后才是可播放文件）
+  if (ext === 'm4s') return null
+  if (PLAYLIST_EXTS.has(ext)) return { kind: 'hls', ext }
 
   const isPlaylistMime = mime ? PLAYLIST_MIME_RE.test(mime) : false
-  if (isPlaylistMime) return { kind: ext === 'mpd' ? 'dash' : 'hls', ext: ext || 'm3u8' }
+  if (isPlaylistMime) {
+    if (/dash\+xml/i.test(mime ?? '')) return null
+    return { kind: 'hls', ext: ext || 'm3u8' }
+  }
 
   if (MEDIA_EXTS.has(ext)) {
     if (SEGMENT_EXTS.has(ext) && (contentLength === undefined || contentLength < 100 * 1024)) {

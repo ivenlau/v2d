@@ -2,12 +2,13 @@
  * Offscreen 宿主桥（§3.1）：runtime 消息 ↔ worker。
  *  - SW 发 v2d/offscreen-start / v2d/offscreen-cancel
  *  - worker 事件经 runtime.sendMessage('v2d/task-event') 回 SW 与 popup
- *  - 本地保存：Chrome = 读 OPFS 建 blob URL 交 SW 走 chrome.downloads；
- *    Safari = 通知 SW 进入待保存态，管理页按钮以用户手势取 blob URL 触发 <a download>
+ *  - 本地保存：统一进入待保存态，由弹窗（自动）/管理页按钮触发 <a download>（文件名受控）
  */
 
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
 const blobUrls = new Map<string, string>()
+/** 已转交「待保存」的任务：后续 worker 事件（迟到的下载/校验）一律丢弃，防状态回退 */
+const stagedPosted = new Set<string>()
 /** 已转发 start、尚未看到终态的任务（worker 崩溃时统一标失败用） */
 const activeTasks = new Set<string>()
 
@@ -32,6 +33,8 @@ worker.addEventListener('message', (e: MessageEvent) => {
     | { type?: string; taskId?: string; fileName?: string; size?: number; state?: string }
     | undefined
   if (data?.type === 'v2d/task-event' && data.taskId) {
+    // 已转交待保存的任务：丢弃迟到事件（防状态回退）
+    if (stagedPosted.has(data.taskId)) return
     // 终态任务移出活跃表
     if (data.state === 'done' || data.state === 'failed' || data.state === 'cancelled') {
       activeTasks.delete(data.taskId)
@@ -39,44 +42,18 @@ worker.addEventListener('message', (e: MessageEvent) => {
   }
   if (data?.type === 'v2d/task-staged' && data.taskId) {
     const taskId: string = data.taskId
-    // 平台分叉：Chrome 有 downloads API → 自动走 SW 保存；Safari 无 downloads →
-    // 通知 SW 进入待保存态，由管理页/弹窗按钮以用户手势触发 <a download>
-    if (import.meta.env.CHROME) {
-      void (async () => {
-        try {
-          const root = await navigator.storage.getDirectory()
-          const dir = await root.getDirectoryHandle('staging')
-          const fh = await dir.getFileHandle(`${taskId}.part`)
-          const file = await fh.getFile()
-          const blobUrl = URL.createObjectURL(file)
-          blobUrls.set(taskId, blobUrl)
-          await chrome.runtime.sendMessage({
-            type: 'v2d/task-blob',
-            taskId,
-            blobUrl,
-            fileName: data.fileName,
-          })
-        } catch (err) {
-          await chrome.runtime
-            .sendMessage({
-              type: 'v2d/task-event',
-              taskId,
-              state: 'failed',
-              error: `暂存文件读取失败: ${String(err)}`,
-            })
-            .catch(() => {})
-        }
-      })()
-    } else {
-      void chrome.runtime
-        .sendMessage({
-          type: 'v2d/task-staged-ready',
-          taskId,
-          fileName: data.fileName,
-          size: data.size,
-        })
-        .catch(() => {})
-    }
+    stagedPosted.add(taskId)
+    // 全平台统一进入待保存态：由弹窗（开着时自动）/管理页按钮触发 <a download>。
+    // 不走 SW 的 downloads API + blob URL——那条路 filename 会被 Chromium 忽略，
+    // 落成「随机 UUID」文件名（弹窗/管理页的 <a download> 文件名受控）
+    void chrome.runtime
+      .sendMessage({
+        type: 'v2d/task-staged-ready',
+        taskId,
+        fileName: data.fileName,
+        size: data.size,
+      })
+      .catch(() => {})
     return
   }
   void chrome.runtime.sendMessage(data).catch(() => {
@@ -87,6 +64,7 @@ worker.addEventListener('message', (e: MessageEvent) => {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'v2d/offscreen-start') {
     console.log('[V2D offscreen] 收到启动任务', msg.task?.id, msg.task?.kind, msg.task?.dest)
+    stagedPosted.delete(msg.task.id)
     activeTasks.add(msg.task.id)
     worker.postMessage({ type: 'start', task: msg.task })
     sendResponse({ ok: true })

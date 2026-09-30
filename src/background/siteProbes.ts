@@ -40,10 +40,16 @@ async function runBilibili(tabId: number): Promise<MediaCandidate[]> {
         80: '1080P', 74: '720P60', 64: '720P', 32: '480P', 16: '360P',
       }
       const state = w.__INITIAL_STATE__?.videoData
+      // 同一清晰度会有多份编码（AVC/HEVC/AV1，id 相同）：去重，优先 AVC（兼容性最好）
+      const byId = new Map()
+      for (const v of dash.video) {
+        const cur = byId.get(v.id)
+        if (!cur || (v.codecid === 7 && cur.codecid !== 7)) byId.set(v.id, v)
+      }
       return {
         title: state?.title || document.title.replace(/_哔哩哔哩_bilibili.*$/, '').trim(),
         bvid: state?.bvid || '',
-        videos: dash.video.map((v: { id: number; baseUrl: string; backupUrl?: string[]; bandwidth?: number }) => ({
+        videos: [...byId.values()].map((v: { id: number; baseUrl: string; backupUrl?: string[]; bandwidth?: number }) => ({
           url: pick(v),
           quality: QN[v.id] ?? String(v.id),
           bandwidth: v.bandwidth,

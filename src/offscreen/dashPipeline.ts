@@ -49,6 +49,11 @@ async function fetchBlob(
     const hint = resp.status === 403 ? '（Referer/防盗链被拒）' : ''
     throw new Error(`HTTP ${resp.status}${hint}`)
   }
+  // 防盗链失效的 CDN 有时返回 200 + 文本/JSON 错误体——不能当视频喂给 demuxer
+  const mime = resp.headers.get('content-type') ?? ''
+  if (/^text\//i.test(mime) || /application\/(json|xml)/i.test(mime)) {
+    throw new Error('CDN 返回了文本错误响应（防盗链可能失效），已中止合成')
+  }
   if (!resp.body) throw new Error('响应无内容')
   const total = Number(resp.headers.get('content-length')) || undefined
   const reader = resp.body.getReader()
@@ -82,6 +87,8 @@ async function mergeDashToBlob(
   video: Blob,
   audio: Blob | undefined,
   signal: AbortSignal,
+  audioOptional: boolean,
+  emit: (patch: Record<string, unknown>) => void,
 ): Promise<Blob> {
   const output = new Output({
     format: new Mp4OutputFormat({ fastStart: 'in-memory' }),
@@ -104,7 +111,15 @@ async function mergeDashToBlob(
     const aInput = new Input({ formats: ALL_FORMATS, source: new BlobSource(audio) })
     aTrack = await aInput.getPrimaryAudioTrack()
     const aCodec = aTrack ? await aTrack.getCodec() : null
-    if (aTrack && aCodec) {
+    if (!aTrack || !aCodec) {
+      // 音轨拉到了但解析不出（编码不受支持/数据异常）——明确失败，绝不产出无声视频
+      console.error('[V2D dash] 音轨解析失败: track=', !!aTrack, 'codec=', aCodec)
+      if (audioOptional) {
+        console.warn('[V2D dash] 音轨允许缺失 → 降级为无声视频')
+      } else {
+        throw new Error(`音轨解析失败（音频编码 ${aCodec ?? '未知'} 不受支持），已取消合成`)
+      }
+    } else {
       aSource = new EncodedAudioPacketSource(aCodec)
       output.addAudioTrack(aSource)
       aSink = new EncodedPacketSink(aTrack)
@@ -113,10 +128,17 @@ async function mergeDashToBlob(
 
   await output.start()
 
+  // 长视频合成可达数十秒：定期心跳保持 SW 存活、UI 状态不停滞
   const vMeta = { decoderConfig: (await vTrack.getDecoderConfig()) ?? undefined }
+  let lastMuxEmit = Date.now()
   for await (const packet of vSink.packets()) {
     if (signal.aborted) throw new Error('cancelled')
     await vSource.add(packet, vMeta)
+    const now = Date.now()
+    if (now - lastMuxEmit >= 1000) {
+      lastMuxEmit = now
+      emit({ state: 'transmuxing' })
+    }
   }
 
   if (aSource && aSink && aTrack) {
@@ -175,7 +197,7 @@ export async function runDashToStage(opts: DashPipelineOptions): Promise<DashSta
   }
 
   emit({ state: 'transmuxing' })
-  const merged = await mergeDashToBlob(video, audio, signal)
+  const merged = await mergeDashToBlob(video, audio, signal, !!audioOptional, emit)
 
   const hasher = await createSHA1()
   hasher.init()
