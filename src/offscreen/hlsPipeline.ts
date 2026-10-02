@@ -176,7 +176,11 @@ export async function runHlsToStage(playlistUrl: string, opts: HlsPipelineOption
       ext = 'mp4'
     } catch (e) {
       if (signal.aborted) throw new Error('cancelled')
-      // H.265 等 mediabunny 不支持的编码 → 原样拼接 .ts（历史兜底行为）
+      // H.265 等 mediabunny 不支持的编码 → 原样拼接 .ts（历史兜底行为）。
+      // 原因必须留痕：回退产物是 .ts 而非承诺的 .mp4，用户需要知道为什么
+      const reason = msg(e)
+      console.warn('[V2D hls] TS→MP4 转封装失败，回退原样 .ts：', reason)
+      emit({ note: `转封装失败（${reason}），已按原始 TS 保存` })
       finalChunks = ordered
       ext = 'ts'
     }

@@ -841,7 +841,7 @@ $('#open-manager').addEventListener('click', () => {
 // ── 115 转存任务进度（popup 内轻展示，管理页在 M4 交付） ────────────────
 interface TaskView {
   id: string
-  kind: 'offline' | 'upload' | 'hls' | 'dash'
+  kind: 'offline' | 'upload' | 'hls' | 'dash' | 'mse'
   dest: 'cloud' | 'local'
   state: string
   fileName: string
@@ -854,6 +854,7 @@ interface TaskView {
   segmentsTotal?: number
   error?: string
   instant?: boolean
+  note?: string
 }
 
 const IS_IOS = /iP(hone|od|ad)/.test(navigator.userAgent)
@@ -924,6 +925,7 @@ async function renderTasks(): Promise<void> {
       ${pct !== null ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>` : ''}
       ${meta ? `<div class="task-meta">${meta}</div>` : ''}
       ${t.error ? `<div class="error">${humanizeError(t.error)}</div>` : ''}
+      ${t.note ? `<div class="task-note">${t.note}</div>` : ''}
     `
     const actions = document.createElement('div')
     actions.className = 'task-actions'

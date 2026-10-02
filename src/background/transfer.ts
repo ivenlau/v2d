@@ -65,6 +65,8 @@ export interface TransferTask {
   segmentsTotal?: number
   pickCode?: string
   instant?: boolean
+  /** 非致命说明（如 HLS 转封装回退 .ts 的原因）；不改变任务状态 */
+  note?: string
   error?: string
   /** 直链断点续传：已收字节对应的 SHA1 中间状态（base64，hash-wasm save()） */
   hashStateB64?: string
@@ -997,6 +999,7 @@ export async function applyTaskEvent(e: {
   error?: string
   pickCode?: string
   instant?: boolean
+  note?: string
 }): Promise<void> {
   const task = (await loadTasks()).find((t) => t.id === e.taskId)
   if (!task) {
@@ -1019,6 +1022,7 @@ export async function applyTaskEvent(e: {
   if (e.hashStateB64 !== undefined) task.hashStateB64 = e.hashStateB64
   if (e.error !== undefined) task.error = e.error
   if (e.pickCode !== undefined) task.pickCode = e.pickCode
+  if (e.note !== undefined) task.note = e.note
   if (e.instant !== undefined) task.instant = e.instant
 
   const terminal = e.state === 'done' || e.state === 'failed' || e.state === 'cancelled'

@@ -11,7 +11,7 @@ import { loadSettings } from '@/core/settings'
 
 interface TaskView {
   id: string
-  kind: 'offline' | 'upload' | 'hls' | 'dash' | 'mse'
+  kind: 'offline' | 'upload' | 'hls' | 'dash' | 'mse' | 'mse'
   dest: 'cloud' | 'local'
   state: string
   fileName: string
@@ -24,6 +24,7 @@ interface TaskView {
   segmentsDone?: number
   segmentsTotal?: number
   error?: string
+  note?: string
   instant?: boolean
   createdAt: number
 }
@@ -120,6 +121,7 @@ function renderTask(t: TaskView): HTMLElement {
     ${pct !== null ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>` : ''}
     <div class="meta">${taskMeta(t)}</div>
     ${t.error ? `<div class="error">${humanizeError(t.error)}</div>` : ''}
+    ${t.note ? `<div class="meta">${t.note}</div>` : ''}
   `
 
   const actions = document.createElement('div')

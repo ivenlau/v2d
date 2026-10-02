@@ -44,6 +44,21 @@ const expectedDuration = out
 console.log(`[e2e] 截短为 ${segCount} 段，期望时长 ≈ ${expectedDuration.toFixed(1)}s`)
 
 const server = http.createServer((req, res) => {
+  if (req.url === '/seg-first.html') {
+    res.writeHead(200, { 'Content-Type': 'text/html' })
+    res.end(`<!doctype html><meta charset="utf-8"><body>
+<script>
+  fetch('/seg.ts').catch(() => {})
+  setTimeout(() => fetch('/e2e.m3u8').catch(() => {}), 2000)
+</script>`)
+    return
+  }
+  // .ts 路径回真实的 TS MIME（否则 mpegurl 会让分类器把它当清单）
+  if (req.url?.endsWith('.ts')) {
+    res.writeHead(200, { 'Content-Type': 'video/mp2t' })
+    res.end(playlistText)
+    return
+  }
   res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' })
   res.end(playlistText)
 })
@@ -63,6 +78,9 @@ const sw = await new Promise((res) => {
   else context.once('serviceworker', res)
 })
 void sw
+const swLogAll = (m) => console.log('[SW]', m.text())
+sw.on('console', swLogAll)
+context.on('serviceworker', (nsw) => nsw.on('console', swLogAll))
 const manager = await context.newPage()
 await manager.goto(`chrome-extension://${new URL(sw.url()).host}/manager.html`)
 await manager.evaluate(async () => {
@@ -140,13 +158,31 @@ if (dur < expectedDuration * 0.5 || dur > expectedDuration * 1.6) {
   throw new Error('时长偏差过大——解密/转封装可能产出了垃圾数据')
 }
 
-// ── 4. HLS 预览（hls.js 弹窗挂载）：页面拉一次清单触发嗅探 → 弹窗出帧断言 ──
+// ── 4. HLS 预览（hls.js 弹窗挂载）+ 分段先到清优回归 ──
 {
   const sniffer = await context.newPage()
-  // 服务器对所有路径都回 playlist 文本：直接开它（main_frame 请求同样会被嗅探器登记）
-  await sniffer.goto(playlistHttpUrl)
-  await sniffer.evaluate((url) => fetch(url).catch(() => {}), playlistHttpUrl)
-  await new Promise((r) => setTimeout(r, 2000)) // webRequest 登记 + 唤醒 SW
+  const base = new URL(playlistHttpUrl).origin
+  // 该页面加载即 fetch 分段（先到），2s 后 fetch 清单（后到）——复刻真实站点的到达顺序竞态
+  await sniffer.goto(`${base}/seg-first.html`)
+  const listTs = async () => {
+    // 从 manager 页代查该标签页的候选
+    return manager.evaluate(async (urlPrefix) => {
+      const tabs = await chrome.tabs.query({ url: urlPrefix + '/*' })
+      if (!tabs[0]?.id) return -2
+      const r = await chrome.runtime.sendMessage({ type: 'list', tabId: tabs[0].id })
+      return (r.candidates ?? []).map((c) => ({ k: c.kind, u: c.url.slice(-30) }))
+    }, base)
+  }
+  await new Promise((r) => setTimeout(r, 1000)) // 分段已到、清单尚未到（页面 2s 后才拉清单）
+  const beforeList = await listTs()
+  console.log('[e2e] 清单前候选:', JSON.stringify(beforeList))
+  const tsBefore = beforeList.filter((c) => c.k === 'file').length
+  if (tsBefore < 1) throw new Error('ts 分段候选未注册（100KB 阈值/路由问题？）')
+  await sniffer.evaluate((u) => fetch(u).catch(() => {}), playlistHttpUrl)
+  await new Promise((r) => setTimeout(r, 1500))
+  const afterList = await listTs()
+  console.log('[e2e] 清单后候选:', JSON.stringify(afterList))
+  if (afterList.some((c) => c.k === 'file' && c.u.endsWith('.ts'))) throw new Error('清单出现后 ts 分段候选未被清除')
 
   const extId = new URL(sw.url()).host
   await sniffer.evaluate((url) => {

@@ -17,6 +17,7 @@ import {
   clearCandidates,
   getCandidate,
   listCandidates,
+  setCandidates,
   updateCandidate,
 } from '@/core/sniffer/store'
 import { probeUrl } from '@/core/probe'
@@ -503,7 +504,22 @@ export default defineBackground(() => {
           discoveredAt: Date.now(),
         }
         if (cls.kind === 'hls' || cls.kind === 'dash') {
+          // 清单首次出现：清掉先到的 .ts/.m4s 分段直链候选（分段先于清单到达时
+          // 会绕过分段去重，且大体积 ts 靠体积加分排在 HLS 卡前面——
+          // 用户点它会直接下载单个原始分段而非合并的 MP4）。
+          // ⚠️ 必须 await：并发执行会让 addCandidates 的合并写入把分段候选带回来
+          const firstPlaylist = !tabHasPlaylist.get(details.tabId)
           tabHasPlaylist.set(details.tabId, true)
+          if (firstPlaylist) {
+            const all = await listCandidates(details.tabId)
+            const kept = all.filter(
+              (c) => !(c.kind === 'file' && (c.url.endsWith('.ts') || c.url.endsWith('.m4s'))),
+            )
+            if (kept.length !== all.length) {
+              await setCandidates(details.tabId, kept)
+              await updateBadge(details.tabId, kept.length)
+            }
+          }
         }
 
         const all = await addCandidates(details.tabId, [cand])

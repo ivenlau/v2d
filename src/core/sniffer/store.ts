@@ -66,6 +66,11 @@ export async function updateCandidate(
   return all[idx]
 }
 
+/** 整表覆写（去噪用：如清单出现后清掉先到的 ts 分段候选） */
+export async function setCandidates(tabId: number, list: MediaCandidate[]): Promise<void> {
+  await store().set({ [KEY(tabId)]: list })
+}
+
 export async function getCandidate(
   tabId: number,
   id: string,

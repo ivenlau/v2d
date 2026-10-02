@@ -414,6 +414,7 @@ button.btn:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 .bar-fill { height: 100%; background: var(--ink); border-radius: 3px; transition: width 0.4s; }
 .task-meta { color: var(--muted); font-size: 12px; }
+.task-note { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 /* ── 移动端适配（iOS 弹窗 sheet / 小屏） ── */
 /* pointer: coarse 门禁：桌面弹窗视口只有 ~380px（body 固定宽），max-width 断点在桌面恒命中；
