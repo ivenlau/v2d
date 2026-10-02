@@ -37,6 +37,17 @@ export type BgRequest =
   | { type: 'getStagedBlob'; taskId: string }
   /** 手动彩蛋：粘贴 直链/磁力/ed2k 走 115 离线（§离线已移出自动通道） */
   | { type: 'offlineSubmit'; url: string }
+  /** MSE 深捕获：把页面内捕获的轨道拉回扩展并合并下载 */
+  | {
+      type: 'mseDownload'
+      tabId: number
+      videoGroupId: string
+      audioGroupId?: string
+      pageTitle?: string
+      fileName?: string
+    }
+  /** MSE 深捕获：拉取少量捕获数据生成弹窗预览（返回暂存文件名，弹窗读完即弃） */
+  | { type: 'msePreview'; tabId: number; groupId: string }
 
 /** offscreen ↔ SW 的内部事件（不经 BgRequest 路由） */
 export interface TaskEvent {

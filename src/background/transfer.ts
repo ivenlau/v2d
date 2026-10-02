@@ -10,6 +10,9 @@ import { classifyLink } from '@/providers/115/offline'
 import type { OfflineTask } from '@/providers/115/openapi'
 import { offlineDone, offlineFailed } from '@/providers/115/openapi'
 import { client115, TOKEN_STORAGE_KEY } from '@/providers/115/runtime'
+import { addCandidates, listCandidates } from '@/core/sniffer/store'
+import { fingerprint } from '@/core/sniffer/hash'
+import { buildFileName } from '@/core/name'
 
 export type TaskState =
   | 'queued'
@@ -29,7 +32,7 @@ export type TaskState =
 
 export interface TransferTask {
   id: string
-  kind: 'offline' | 'upload' | 'hls' | 'dash'
+  kind: 'offline' | 'upload' | 'hls' | 'dash' | 'mse'
   /** cloud = 转存 115；local = 保存本地（hls/dash 走队列） */
   dest: 'cloud' | 'local'
   state: TaskState
@@ -41,11 +44,17 @@ export interface TransferTask {
   variantUrl?: string
   /** dash：双轨 DASH 描述符（视频轨 + 可选音频轨直链） */
   dashSpec?: DashSpec
+  /** mse：捕获任务的目标页与分组（页面内存中的数据，任务启动时拉回） */
+  mse?: { tabId: number; videoGroupId: string; audioGroupId?: string }
+  /** mse：拉取完成后的暂存文件名（staging/{file}.part）与容器 */
+  msePull?: { videoFile: string; audioFile?: string; container: 'mp4' | 'webm' }
   /** Safari/iOS：合并产物已就绪，等待用户在管理页点「保存到文件」 */
   stagedFileName?: string
   stagedSize?: number
   /** Chrome：保存中任务的 chrome.downloads 记录 id（onChanged 收口用，SW 休眠也不丢） */
   downloadId?: number
+  /** 页面 <a download> 保存中：blob URL（onChanged 按 url 匹配收口；SW 重启恢复用） */
+  savingBlobUrl?: string
   size?: number
   /** downloading：已收字节；offline：percentDone 借用 uploaded 展示 */
   received?: number
@@ -71,6 +80,8 @@ let tasks: TransferTask[] | null = null
 let pumping = false
 const cancelled = new Set<string>()
 const uploadWaiters = new Map<string, () => void>()
+/** 每任务最近一次管线事件时间（看门狗续期用；有事件 = 管线活着） */
+const lastTaskEventAt = new Map<string, number>()
 let lastPersist = 0
 
 function sleep(ms: number): Promise<void> {
@@ -256,19 +267,358 @@ export async function enqueueTransfer(
   return task
 }
 
+// ── MSE 深捕获（引擎 C）：分组登记 + 拉取落盘 ──────────────────────────
+export interface MseGroupInfo {
+  /** 复合 id：`${frameId}:${钩子内分组号}`——分组归属页面内的具体框架 */
+  groupId: string
+  mime: string
+  bytes: number
+  appends: number
+  trackKind: 'video' | 'audio' | 'combined'
+  overflow?: boolean
+  title: string
+}
+
+/** 页面内存中的捕获数据是真相源；这里只存摘要（SW 重启后等下一次上报即恢复） */
+const mseGroups = new Map<number, Map<string, MseGroupInfo & { frameId: number }>>()
+
+/** 页面捕获钩子上报摘要：登记内存态 + upsert 候选（弹窗卡片，bytes 实时增长） */
+export async function applyMseGroups(
+  tabId: number,
+  frameId: number,
+  groups: MseGroupInfo[],
+): Promise<void> {
+  // 按框架合并（多框架页面各自上报，不能整体替换）
+  const map = mseGroups.get(tabId) ?? new Map()
+  for (const g of groups) map.set(`${frameId}:${g.groupId}`, { ...g, frameId })
+  mseGroups.set(tabId, map)
+  for (const [compositeId, g] of map) {
+    const id = fingerprint(`mse|${tabId}|${compositeId}`)
+    await addCandidates(tabId, [
+      {
+        id,
+        tabId,
+        url: `mse://${tabId}/${compositeId}`,
+        kind: 'blob',
+        origin: 'mse',
+        mime: g.mime,
+        size: g.bytes,
+        probed: true,
+        fileName: buildFileName({
+          title: `${g.title || 'MSE 捕获'}·${g.trackKind === 'audio' ? '音频' : '视频'}`,
+          url: '',
+          ext: g.mime.includes('webm') ? 'webm' : 'mp4',
+        }),
+        mse: {
+          groupId: compositeId,
+          mime: g.mime,
+          bytes: g.bytes,
+          appends: g.appends,
+          trackKind: g.trackKind,
+          ...(g.overflow ? { overflow: true } : {}),
+        },
+        discoveredAt: Date.now(),
+      },
+    ])
+  }
+}
+
+/** 入队 MSE 捕获任务（dest local：拉回 → 合并 → 待保存） */
+export async function enqueueMseTransfer(
+  req: { tabId: number; videoGroupId: string; audioGroupId?: string; pageTitle?: string; fileName?: string },
+  settings: V115Settings,
+): Promise<TransferTask> {
+  const task: TransferTask = {
+    id: genTaskId(),
+    kind: 'mse',
+    dest: 'local',
+    state: 'queued',
+    url: `mse://${req.tabId}/${req.videoGroupId}`,
+    fileName: forceMergeExt(req.fileName?.trim() || 'MSE 捕获.mp4'),
+    targetPath: joinTargetPath(settings.targetRoot, `mse://${req.tabId}/capture`),
+    pageTitle: req.pageTitle,
+    mse: {
+      tabId: req.tabId,
+      videoGroupId: req.videoGroupId,
+      ...(req.audioGroupId ? { audioGroupId: req.audioGroupId } : {}),
+    },
+    createdAt: Date.now(),
+  }
+  const all = await loadTasks()
+  all.push(task)
+  await persist(true)
+  void pump()
+  return task
+}
+
+interface MsePullSession {
+  file: string
+  /** 下载任务拉取才有关联任务（预览拉取无任务，不更新进度） */
+  taskId?: string
+  received: number
+  /** 预览限量：拉够即止（钩子侧同步截断） */
+  maxBytes?: number
+  finish: (err?: Error) => void
+}
+const msePulls = new Map<string, MsePullSession>()
+
+/** 预览限量：拉前 1.5MB（fMP4/WebM 的 init+首分片足够出首帧），弹窗读完即弃 */
+// 预览限量：必须覆盖「init 段 + 第一个完整分片」才能出帧（截断在分片中间 <video> 解析
+// 不到帧就直接报错）。真实站点 1080p 首分片普遍 1~4MB，1.5MB 会切坏——取 8MB。
+// 数据写入临时暂存、弹窗读完即弃，内存只是瞬态。
+const MSE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+/** SW 重启会丢 mseGroups 内存态：让页面钩子重新上报一次摘要并等待（钩子 1s 节流内应答） */
+async function requestMseReannounce(tabId: number): Promise<void> {
+  try {
+    const sent = chrome.tabs.sendMessage(tabId, { type: 'v2d/mse-announce' })
+    if (sent instanceof Promise) await sent.catch(() => {})
+  } catch {
+    /* 页面已关闭 */
+  }
+  await sleep(1200)
+}
+
+/** 弹窗预览：从页面限量拉取一个捕获组到临时暂存文件（调用方读完自行 dispose） */
+export async function startMsePreview(
+  tabId: number,
+  groupId: string,
+): Promise<{ ok: true; file: string } | { ok: false; reason: string }> {
+  let g = mseGroups.get(tabId)?.get(groupId)
+  if (!g) {
+    await requestMseReannounce(tabId)
+    g = mseGroups.get(tabId)?.get(groupId)
+  }
+  if (!g) return { ok: false, reason: '捕获数据不存在（页面可能已刷新）' }
+  if (g.bytes === 0) return { ok: false, reason: '捕获数据为空' }
+  await ensureTransferHost()
+  const [frameId, rawId] = splitCompositeId(groupId)
+  const requestId = genTaskId()
+  const file = `pv_${requestId}`
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        msePulls.delete(requestId)
+        reject(new Error('预览数据拉取超时'))
+      }, 20_000)
+      msePulls.set(requestId, {
+        file,
+        received: 0,
+        maxBytes: MSE_PREVIEW_MAX_BYTES,
+        finish: (err) => {
+          clearTimeout(timer)
+          msePulls.delete(requestId)
+          err ? reject(err) : resolve()
+        },
+      })
+      try {
+        const sent = chrome.tabs.sendMessage(
+          tabId,
+          { type: 'v2d/mse-pull', requestId, groupId: rawId, limitBytes: MSE_PREVIEW_MAX_BYTES },
+          { frameId },
+        )
+        if (sent instanceof Promise) {
+          sent.catch(() => msePulls.get(requestId)?.finish(new Error('无法连接页面')))
+        }
+      } catch (e) {
+        msePulls.get(requestId)?.finish(new Error(`无法连接页面: ${msg(e)}`))
+      }
+    })
+    return { ok: true, file }
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 把一个捕获组从其所在框架分块拉回、写入 offscreen 暂存（stop-and-wait，bg 落盘后才 ack 下一块） */
+async function pullMseGroup(
+  tabId: number,
+  frameId: number,
+  groupId: string,
+  file: string,
+  expected: number,
+  task: TransferTask,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const requestId = genTaskId()
+    const timer = setTimeout(() => {
+      msePulls.delete(requestId)
+      reject(new Error('捕获数据拉取超时（10 分钟）'))
+    }, 10 * 60_000)
+    console.log('[V2D mse-pull] 注册会话', requestId, '→', file)
+    msePulls.set(requestId, {
+      file,
+      taskId: task.id,
+      received: 0,
+      finish: (err) => {
+        clearTimeout(timer)
+        msePulls.delete(requestId)
+        err ? reject(err) : resolve()
+      },
+    })
+    void expected
+    try {
+      // 精准定向到捕获所在的框架：广播会让其他框架的钩子回 pull-missing 误杀会话
+      const sent = chrome.tabs.sendMessage(
+        tabId,
+        { type: 'v2d/mse-pull', requestId, groupId },
+        { frameId },
+      )
+      if (sent instanceof Promise) {
+        sent.catch(() => {
+          const s = msePulls.get(requestId)
+          if (s) s.finish(new Error('无法连接页面（可能已关闭或正在刷新），请重新播放后再试'))
+        })
+      }
+    } catch (e) {
+      msePulls.get(requestId)?.finish(new Error(`无法连接页面: ${msg(e)}`))
+    }
+  })
+}
+
+/** 拉回流程：确认捕获组仍存在 → 逐组分块拉取写入暂存 → 记录 msePull 供 worker 合并 */
+async function pullMseCapture(task: TransferTask): Promise<void> {
+  const mse = task.mse
+  if (!mse) throw new Error('任务缺少捕获信息')
+  let groups = mseGroups.get(mse.tabId)
+  let video = groups?.get(mse.videoGroupId)
+  if (!video) {
+    await requestMseReannounce(mse.tabId)
+    groups = mseGroups.get(mse.tabId)
+    video = groups?.get(mse.videoGroupId)
+  }
+  if (!video) throw new Error('页面已关闭或捕获数据已清空，请重新播放后再试')
+  const audio = mse.audioGroupId ? groups!.get(mse.audioGroupId) : undefined
+  if (mse.audioGroupId && !audio) throw new Error('捕获的音频轨已不存在，请重新播放后再试')
+
+  await ensureTransferHost()
+  task.msePull = {
+    videoFile: `${task.id}_v`,
+    ...(audio ? { audioFile: `${task.id}_a` } : {}),
+    container: video.mime.includes('webm') ? 'webm' : 'mp4',
+  }
+  await persist(true)
+
+  const [vFrame, vId] = splitCompositeId(mse.videoGroupId)
+  await pullMseGroup(mse.tabId, vFrame, vId, task.msePull.videoFile, video.bytes, task)
+  if (audio) {
+    const [aFrame, aId] = splitCompositeId(mse.audioGroupId!)
+    await pullMseGroup(mse.tabId, aFrame, aId, task.msePull.audioFile!, audio.bytes, task)
+  }
+
+  // 孤儿防护：拉取期间 storage.onChanged 可能使闭包里的 task 失效，重新挂回活缓存再写
+  const fresh = (await loadTasks()).find((t) => t.id === task.id)
+  if (fresh && fresh.state === 'downloading') {
+    fresh.msePull = task.msePull
+    await persist(true)
+  }
+}
+
+/** 复合 id `${frameId}:${groupId}` → [frameId, groupId]；非复合（历史数据）回退顶层框架 */
+function splitCompositeId(composite: string): [number, string] {
+  const idx = composite.indexOf(':')
+  if (idx <= 0) return [0, composite]
+  const frameId = Number(composite.slice(0, idx))
+  return [Number.isFinite(frameId) ? frameId : 0, composite.slice(idx + 1)]
+}
+
+/** 拉取数据块：写入 offscreen 暂存（页面桥在 ack 前会等待本调用完成） */
+export async function handleMseChunk(requestId: string, data: Uint8Array): Promise<boolean> {
+  const session = msePulls.get(requestId)
+  if (!session) {
+    console.warn('[V2D mse-chunk] 无会话', requestId, '已知:', [...msePulls.keys()])
+    return false
+  }
+  if (session.taskId && cancelled.has(session.taskId)) {
+    const task = (await loadTasks()).find((t) => t.id === session.taskId)
+    if (task && task.state !== 'done') {
+      task.state = 'cancelled'
+      task.finishedAt = Date.now()
+      await persist(true)
+      broadcastTask(task.id)
+    }
+    session.finish(new Error('已取消'))
+    return false
+  }
+  try {
+    // 预览限量：超限部分截掉（钩子侧已同步截断，这里是兜底）
+    let bytes = data
+    if (session.maxBytes !== undefined && session.received + bytes.length > session.maxBytes) {
+      bytes = bytes.subarray(0, Math.max(0, session.maxBytes - session.received))
+    }
+    if (bytes.length > 0) {
+      const resp = (await chrome.runtime.sendMessage({
+        type: 'v2d/mse-stage-write',
+        file: session.file,
+        chunk: bytes,
+      })) as { ok?: boolean; error?: string } | undefined
+      if (!resp?.ok) throw new Error(resp?.error ?? '暂存写入失败')
+      session.received += bytes.length
+    }
+    const task = session.taskId ? (await loadTasks()).find((t) => t.id === session.taskId) : undefined
+    if (task && task.state === 'downloading') {
+      task.received = session.received
+      await persist()
+      broadcastTask(task.id)
+    }
+    return true
+  } catch (e) {
+    session.finish(e instanceof Error ? e : new Error(String(e)))
+    return false
+  }
+}
+
+export function handleMsePullDone(requestId: string): void {
+  const session = msePulls.get(requestId)
+  if (!session) return
+  void (async () => {
+    try {
+      await chrome.runtime.sendMessage({ type: 'v2d/mse-stage-close', file: session.file })
+    } catch {
+      /* ignore */
+    }
+    session.finish()
+  })()
+}
+
+export function handleMsePullMissing(requestId: string): void {
+  msePulls.get(requestId)?.finish(new Error('捕获数据不存在（页面可能已刷新），请重新播放后再试'))
+}
+
 export async function cancelTask(taskId: string): Promise<boolean> {
   const task = (await loadTasks()).find((t) => t.id === taskId)
   if (!task) return false
+  // 排队中的任务管线尚未启动：直接标记取消。发 offscreen-cancel 是无的放矢
+  //（worker 里没有这个任务），状态永不变更——之后泵还会照常拉起它（「取消无效」的根源）
+  if (task.state === 'queued') {
+    task.state = 'cancelled'
+    task.error = '已取消'
+    task.finishedAt = Date.now()
+    await persist(true)
+    broadcastTask(taskId)
+    return true
+  }
   cancelled.add(taskId)
+  // mse 拉取阶段：没有 worker 可中断，直接落库取消态并终结该任务的所有拉取会话
+  //（会话以「已取消」拒绝 → pullMseCapture 抛出 → pump 跳过已取消任务）
+  if (task.kind === 'mse' && task.state === 'downloading') {
+    task.state = 'cancelled'
+    task.finishedAt = Date.now()
+    await persist(true)
+    broadcastTask(taskId)
+    for (const [, s] of msePulls) if (s.taskId === taskId) s.finish(new Error('已取消'))
+    return true
+  }
   if (
-    task.state === 'downloading' || task.state === 'hashing' || task.state === 'uploading' ||
-    task.state === 'queued' || task.state === 'paused'
+    task.state === 'downloading' || task.state === 'hashing' || task.state === 'transmuxing' ||
+    task.state === 'checking' || task.state === 'uploading' || task.state === 'paused'
   ) {
     if (task.state === 'paused') {
       // 暂停态无运行中的管线：直接标记取消
       task.state = 'cancelled'
       task.finishedAt = Date.now()
       await persist(true)
+      broadcastTask(taskId)
       void pump()
       return true
     }
@@ -321,6 +671,31 @@ export async function retryTask(taskId: string): Promise<boolean> {
 }
 
 /** 删除任务记录并清理暂存文件（终态；Safari 待保存任务在用户确认后调用） */
+/** 清理任务的 OPFS 暂存产物。删除逻辑在 offscreen 宿主里——它可能在任务 staged 后
+ *  就被泵排空关闭了（staged 不算活跃任务），此时必须重新拉起再删，否则暂存泄漏。
+ *  ⚠️ 必须校验 resp.ok：消息会同时投递给其他扩展页（popup/manager 的监听器只收不回），
+ *  无人应答时 sendMessage 以 null resolve 而非 reject——只看是否抛错会误判成功。 */
+async function disposeStaging(taskId: string): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    let resp: { ok?: boolean } | undefined
+    try {
+      resp = (await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId })) as
+        | { ok?: boolean }
+        | undefined
+    } catch {
+      /* 无任何接收方 */
+    }
+    if (resp?.ok) return // offscreen 已删除完毕（删完才响应）
+    if (!import.meta.env.CHROME) return // Safari 无 offscreen：后台标签页通常仍在
+    try {
+      await ensureTransferHost()
+    } catch {
+      /* ignore */
+    }
+    await sleep(300)
+  }
+}
+
 export async function deleteTask(taskId: string): Promise<boolean> {
   const task = (await loadTasks()).find((t) => t.id === taskId)
   if (!task) return false
@@ -333,11 +708,7 @@ export async function deleteTask(taskId: string): Promise<boolean> {
   if (!terminal) return false
   tasks = (await loadTasks()).filter((t) => t.id !== taskId)
   await persist(true)
-  try {
-    await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId })
-  } catch {
-    /* ignore */
-  }
+  await disposeStaging(taskId)
   return true
 }
 
@@ -357,9 +728,16 @@ export async function recoverStuckTasks(): Promise<void> {
   let changed = false
   for (const t of all) {
     if (t.state === 'saving') {
-      // blob URL 所在的交接流程随 SW 死亡丢失，无法自动续
-      t.state = 'failed'
-      t.error = '浏览器重启导致保存中断，请重试'
+      if (t.savingBlobUrl) {
+        // 页面 <a download> 保存被浏览器重启打断：暂存产物仍在 OPFS，回待保存可重试
+        t.state = 'staged'
+        t.savingBlobUrl = undefined
+        t.error = '浏览器重启中断了保存，请重新点击保存'
+      } else {
+        // blob URL 所在的交接流程随 SW 死亡丢失，无法自动续
+        t.state = 'failed'
+        t.error = '浏览器重启导致保存中断，请重试'
+      }
       t.finishedAt = Date.now()
       changed = true
     } else if (t.state === 'paused' || t.state === 'staged') {
@@ -391,16 +769,28 @@ async function pump(): Promise<void> {
       try {
         if (next.kind === 'offline') {
           await runOfflineTask(next)
+        } else if (next.kind === 'mse') {
+          // Referer 规则已常驻（installRefererRules），任务直接进管线
+          await pullMseCapture(next)
+          await runUploadTask(next)
         } else {
-          await ensureRefererRuleForTask(next)
+          // Referer 规则已常驻（installRefererRules），任务直接进管线
           await runUploadTask(next)
         }
       } catch (e) {
-        // 任何未预期异常都不能卡死串行队列：标记失败并继续
-        next.state = 'failed'
-        next.error = `任务异常: ${e instanceof Error ? e.message : String(e)}`
-        next.finishedAt = Date.now()
-        await persist(true)
+        // 任何未预期异常都不能卡死串行队列：标记失败并继续。
+        // 孤儿防护：迭代中途的 persist 可能让 next 失效——失败必须写进活缓存，
+        // 否则失败状态静默丢失，任务永远停在「下载中」（mse 拉取曾因此卡死）
+        const fresh = (await loadTasks()).find((t) => t.id === next.id) ?? next
+        if (e instanceof Error && e.message === '已取消') {
+          // 取消态已由取消方落库，这里不再覆盖
+        } else {
+          fresh.state = 'failed'
+          fresh.error = `任务异常: ${e instanceof Error ? e.message : String(e)}`
+          fresh.finishedAt = Date.now()
+          await persist(true)
+          broadcastTask(fresh.id)
+        }
       }
       // 离线失败降级会把任务置回 queued，循环自然衔接直传
     }
@@ -515,13 +905,16 @@ async function runUploadTask(task: TransferTask): Promise<void> {
     type: 'v2d/offscreen-start',
     task: {
       id: task.id,
-      kind: task.kind === 'hls' ? 'hls' : 'direct',
+      // kind 必须原样透传（dash → worker 的 runDashTask 双轨合并；mse → runMseTask 捕获合并）：
+      // 曾被折叠成 'direct'，导致 DASH 只下视频轨、产物无声
+      kind: task.kind === 'hls' ? 'hls' : task.kind === 'dash' ? 'dash' : task.kind === 'mse' ? 'mse' : 'direct',
       dest: task.dest,
       url: task.url,
       fileName: task.fileName,
       targetPath: task.targetPath,
       ...(task.variantUrl ? { variantUrl: task.variantUrl } : {}),
       ...(task.dashSpec ? { dashSpec: task.dashSpec } : {}),
+      ...(task.msePull ? { msePull: task.msePull } : {}),
       // 断点续传元数据（仅直链；worker 校验 hash 状态与暂存长度一致才续传）
       ...(task.hashStateB64 ? { hashStateB64: task.hashStateB64 } : {}),
       ...(task.received !== undefined ? { received: task.received } : {}),
@@ -554,12 +947,17 @@ async function runUploadTask(task: TransferTask): Promise<void> {
       /* ignore */
     }
   }
-  // 看门狗：管线 120s 无任何终态/暂停事件 → 判定死亡，避免任务永远「下载中」
-  const outcome = await Promise.race([
-    waiterDone.then(() => 'settled' as const),
-    sleep(120_000).then(() => 'timeout' as const),
-  ])
-  if (outcome === 'timeout') {
+  // 看门狗：管线 120s 无「任何」事件 → 判定死亡，避免任务永远「下载中」。
+  // 事件到达即续期——下载/合成大视频远超 120s 是正常的（曾误杀全部长视频任务）
+  const startedAt = Date.now()
+  lastTaskEventAt.set(task.id, startedAt)
+  for (;;) {
+    const outcome = await Promise.race([
+      waiterDone.then(() => 'settled' as const),
+      sleep(10_000).then(() => 'tick' as const),
+    ])
+    if (outcome === 'settled') break
+    if (Date.now() - (lastTaskEventAt.get(task.id) ?? startedAt) <= 120_000) continue
     releaseWaiter(task.id)
     if (task.state !== 'paused' && task.state !== 'done') {
       task.state = 'failed'
@@ -573,7 +971,9 @@ async function runUploadTask(task: TransferTask): Promise<void> {
     } catch {
       /* ignore */
     }
+    break
   }
+  lastTaskEventAt.delete(task.id)
 }
 
 export interface OffscreenTaskPayload {
@@ -604,6 +1004,8 @@ export async function applyTaskEvent(e: {
     return
   }
   console.log('[V2D] 任务事件', e.taskId, e.state ?? '', e.error ?? '')
+  // 任何事件都给看门狗续期（终态/暂停会随即释放 waiter，此处记录无副作用）
+  lastTaskEventAt.set(e.taskId, Date.now())
   // staged/saving/done 后不再接受 worker 事件回退状态——
   // 迟到的下载/校验事件会把「待保存」覆盖回「校验中」，任务就此卡死
   if (task.state === 'staged' || task.state === 'saving' || task.state === 'done') return
@@ -695,21 +1097,31 @@ export async function handleTaskBlob(taskId: string, blobUrl: string, fileName: 
 
 /** 保存收口（轮询快路径 / onChanged 唤醒共用；重复通知幂等） */
 export async function finishDownloadTask(downloadId: number, err: string | null): Promise<void> {
-  const task = (await loadTasks()).find((t) => t.downloadId === downloadId)
+  const [rec] = await chrome.downloads.search({ id: downloadId }).catch(() => [])
+  const task = (await loadTasks()).find(
+    (t) => t.downloadId === downloadId || (rec && t.savingBlobUrl && t.savingBlobUrl === rec.url),
+  )
   if (!task || task.state !== 'saving') return
+  if (err && task.savingBlobUrl) {
+    // 页面 <a download> 保存失败：回到待保存（暂存产物仍在 OPFS，可直接再点保存）
+    task.state = 'staged'
+    task.error = `浏览器保存失败（${err}），可再次点击保存`
+    task.savingBlobUrl = undefined
+    await persist(true)
+    broadcastTask(task.id)
+    return
+  }
   if (err) {
     task.state = 'failed'
     task.error = err
   } else {
     task.state = 'done'
   }
+  task.savingBlobUrl = undefined
   task.finishedAt = Date.now()
   await persist(true)
-  try {
-    await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId: task.id })
-  } catch {
-    /* offscreen 可能已关闭 */
-  }
+  broadcastTask(task.id)
+  await disposeStaging(task.id)
   void pump()
 }
 
@@ -723,6 +1135,10 @@ export async function applyStagedReady(taskId: string, fileName: string, size: n
   task.received = size
   task.finishedAt = Date.now()
   await persist(true)
+  broadcastTask(taskId)
+  // staged = 管线工作已结束（等用户点保存），必须释放串行队列槽位——
+  // 否则泵阻塞到看门狗超时（120s），期间后续任务全部卡「排队中」
+  releaseWaiter(taskId)
 }
 
 /** 用户点击保存（<a download> 已触发）后收口 */
@@ -732,11 +1148,8 @@ export async function markTaskSaved(taskId: string): Promise<void> {
   task.state = 'done'
   task.finishedAt = Date.now()
   await persist(true)
-  try {
-    await chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId })
-  } catch {
-    /* ignore */
-  }
+  broadcastTask(taskId)
+  await disposeStaging(taskId)
 }
 
 // ── 传输宿主（平台抽象，§11）：Chrome=offscreen document；Safari=后台标签页 ──
@@ -775,76 +1188,92 @@ async function maybeCloseOffscreen(): Promise<void> {
     } catch {
       /* 本来就没开 */
     }
-    await removeRefererRule().catch(() => {})
   }
 }
 
-// ── DNR：按站点族注入 Referer（CDN 防盗链要求 UA+Referer；浏览器 fetch 无法自设 Referer） ──
-const REFERER_RULE_ID = 1001
+// ── DNR：常驻 Referer 规则（CDN 防盗链要求 UA+Referer；浏览器 fetch/<video> 均无法自设 Referer） ──
+const REFERER_RULE_ID_BASE = 2000
 
-/** 已适配站点的 CDN 域 → 应携带的 Referer（新增适配器在此扩展） */
-const REFERER_RULES: Array<{ test: RegExp; referer: string }> = [
-  { test: /bilivideo\.com|bilibili\.com/, referer: 'https://www.bilibili.com/' },
-  { test: /douyin(vod)?\.com|zjcdn\.com|douyin\.com/, referer: 'https://www.douyin.com/' },
-  { test: /kuaishou\.com|gifshow\.com|yximgs\.com/, referer: 'https://www.kuaishou.com/' },
-  { test: /xhscdn\.com|xiaohongshu\.com/, referer: 'https://www.xiaohongshu.com/' },
-  // ── 海外 / 成人站（P1.5）──
-  { test: /vimeocdn\.com|vimeo\.com/, referer: 'https://vimeo.com/' },
-  { test: /tiktokcdn\w*\.com|tiktokv\w*\.com|byteoversea\.com|tiktok\.com/, referer: 'https://www.tiktok.com/' },
-  { test: /redd\.it|redditmedia\.com|reddit\.com/, referer: 'https://www.reddit.com/' },
-  { test: /phncdn\.com|pornhub\.com/, referer: 'https://www.pornhub.com/' },
-  { test: /xvideos-cdn\.com|xvideos\.com/, referer: 'https://www.xvideos.com/' },
-  { test: /xhcdn\.com|xhamster\w*\.com/, referer: 'https://xhamster.com/' },
-  { test: /xnxx-?cdn|xnxx\.com/, referer: 'https://www.xnxx.com/' },
-  { test: /youporn\.com/, referer: 'https://www.youporn.com/' },
-  { test: /spankbang\.com/, referer: 'https://spankbang.com/' },
-  { test: /eporner\.com/, referer: 'https://www.eporner.com/' },
+/**
+ * 站点族 CDN 域 → 应携带的 Referer（新增适配器在此扩展）。
+ * requestDomains 匹配注册域及其全部子域（含 mcdn.bilivideo.cn 这类 P2P CDN）。
+ * 常驻而非任务期注入：传输拉流（xhr）与弹窗视频预览（media）都需要，且会话规则
+ * 存活于浏览器进程、SW 休眠不丢。只影响已适配站点的 CDN 域，页面自身请求的
+ * Referer 本就是同值（覆写为 no-op）。
+ */
+const REFERER_RULES: Array<{ domains: string[]; referer: string }> = [
+  { domains: ['bilivideo.com', 'bilivideo.cn', 'bilibili.com'], referer: 'https://www.bilibili.com/' },
+  { domains: ['douyin.com', 'douyinvod.com', 'zjcdn.com'], referer: 'https://www.douyin.com/' },
+  { domains: ['kuaishou.com', 'gifshow.com', 'yximgs.com'], referer: 'https://www.kuaishou.com/' },
+  { domains: ['xhscdn.com', 'xiaohongshu.com'], referer: 'https://www.xiaohongshu.com/' },
+  { domains: ['vimeo.com', 'vimeocdn.com'], referer: 'https://vimeo.com/' },
+  { domains: ['tiktok.com', 'tiktokcdn.com', 'tiktokcdn-us.com', 'tiktokv.com', 'byteoversea.com'], referer: 'https://www.tiktok.com/' },
+  { domains: ['reddit.com', 'redditmedia.com', 'redd.it'], referer: 'https://www.reddit.com/' },
+  { domains: ['pornhub.com', 'phncdn.com'], referer: 'https://www.pornhub.com/' },
+  { domains: ['xvideos.com', 'xvideos-cdn.com'], referer: 'https://www.xvideos.com/' },
+  { domains: ['xhamster.com', 'xhcdn.com'], referer: 'https://xhamster.com/' },
+  { domains: ['xnxx.com', 'xnxx-cdn.com'], referer: 'https://www.xnxx.com/' },
+  { domains: ['youporn.com'], referer: 'https://www.youporn.com/' },
+  { domains: ['spankbang.com'], referer: 'https://spankbang.com/' },
+  { domains: ['eporner.com'], referer: 'https://www.eporner.com/' },
 ]
 
-async function ensureRefererRuleForTask(task: TransferTask): Promise<void> {
-  try {
-    // Safari 的 DNR 支持不完整：不可用时静默跳过（对应 CDN 任务会以 403 失败并提示）
-    if (typeof chrome.declarativeNetRequest === 'undefined') return
-    const url = task.dashSpec?.video ?? task.variantUrl ?? task.url
-    let host = ''
-    try {
-      host = new URL(url).hostname
-    } catch {
-      return
-    }
-    const matched = REFERER_RULES.find((r) => r.test.test(host))
-    if (!matched) {
-      await removeRefererRule().catch(() => {})
-      return
-    }
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [REFERER_RULE_ID],
-      addRules: [
-        {
-          id: REFERER_RULE_ID,
-          priority: 1,
-          condition: {
-            requestDomains: [host.split('.').slice(-2).join('.')],
-            resourceTypes: ['xmlhttprequest'],
-          },
-          action: {
-            type: 'modifyHeaders',
-            requestHeaders: [{ header: 'Referer', operation: 'set', value: matched.referer }],
-          },
-        },
-      ],
-    })
-  } catch {
-    /* DNR 不可用：跳过 */
-  }
-}
-
-async function removeRefererRule(): Promise<void> {
-  await chrome.declarativeNetRequest.updateSessionRules({
-    removeRuleIds: [REFERER_RULE_ID],
-  })
+/** SW 启动时注入全部族规则（幂等；Safari DNR 不完整则跳过，对应请求会 403 并有明确提示） */
+export function installRefererRules(): void {
+  if (typeof chrome.declarativeNetRequest === 'undefined') return
+  const rules = REFERER_RULES.map((r, i) => ({
+    id: REFERER_RULE_ID_BASE + i,
+    priority: 1,
+    condition: {
+      requestDomains: r.domains,
+      resourceTypes: [chrome.declarativeNetRequest.ResourceType.XMLHTTPREQUEST, chrome.declarativeNetRequest.ResourceType.MEDIA],
+    },
+    action: {
+      type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+      requestHeaders: [{ header: 'Referer', operation: chrome.declarativeNetRequest.HeaderOperation.SET, value: r.referer }],
+    },
+  }))
+  void chrome.declarativeNetRequest
+    .updateSessionRules({ removeRuleIds: rules.map((r) => r.id), addRules: rules })
+    .catch(() => {})
 }
 
 function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+/** SW 侧状态变更广播给 popup/manager（worker 事件之外的变更页面感知不到，需主动通知） */
+function broadcastTask(taskId: string): void {
+  chrome.runtime.sendMessage({ type: 'v2d/task-event', taskId }).catch(() => {})
+}
+
+// ── 页面 <a download> 保存的统一收口 ────────────────────────────────────
+// 页面只负责触发下载（saveStagedProduct），删暂存/标终态一律等 Chrome 下载终态：
+// 完成 → 标 done + 删暂存；失败 → 回到待保存（暂存产物还在，可直接再点保存）。
+// 此前管理页在点击后立刻删暂存，Chrome 还没读完 blob 数据源就被删 → NETWORK_FAILED。
+export async function watchPageSave(taskId: string, blobUrl: string): Promise<void> {
+  const task = (await loadTasks()).find((t) => t.id === taskId)
+  if (!task || task.state !== 'staged') return
+  task.state = 'saving'
+  task.error = undefined
+  task.savingBlobUrl = blobUrl
+  await persist(true)
+  broadcastTask(taskId)
+
+  // <a download> 拿不到下载 id：按 blob URL 等下载记录出现（通常 <1s）
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await sleep(500)
+    const recs = await chrome.downloads.search({ orderBy: ['-startTime'], limit: 20 }).catch(() => [])
+    if (recs.some((r) => r.url === blobUrl)) return
+  }
+  // 浏览器迟迟未开始下载（被拦截/页面已销毁）：回退待保存，暂存保留可重试
+  const fresh = (await loadTasks()).find((t) => t.id === taskId)
+  if (fresh && fresh.state === 'saving') {
+    fresh.state = 'staged'
+    fresh.savingBlobUrl = undefined
+    fresh.error = '浏览器未开始下载，可再次点击保存'
+    await persist(true)
+    broadcastTask(taskId)
+  }
 }

@@ -11,6 +11,8 @@ const blobUrls = new Map<string, string>()
 const stagedPosted = new Set<string>()
 /** 已转发 start、尚未看到终态的任务（worker 崩溃时统一标失败用） */
 const activeTasks = new Set<string>()
+/** MSE 捕获落盘的暂存写句柄（本上下文无 SyncAccessHandle，用 createWritable 追加） */
+const mseWriters = new Map<string, { w: FileSystemWritableFileStream; size: number }>()
 
 // Worker 资产加载失败/顶层异常目前是「静默死亡」：postMessage 不报错、事件永不到来。
 // 必须在此捕获并显式上报，否则任务永远停在「下载中」。
@@ -75,6 +77,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     worker.postMessage({ type: 'pause', taskId: msg.taskId })
     sendResponse({ ok: true })
   } else if (msg?.type === 'v2d/dispose-file') {
+    // 删完再响应：调用方（SW）收到响应后可能立即排空队列并关闭本文档——
+    // 先响应再删会被 close 中途杀死，暂存文件泄漏（e2e 实测必现）
     void (async () => {
       const url = blobUrls.get(msg.taskId)
       if (url) {
@@ -86,10 +90,49 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const dir = await root.getDirectoryHandle('staging')
         await dir.removeEntry(`${msg.taskId}.part`)
       } catch {
-        /* ignore */
+        /* 不存在/已删除 */
+      }
+      sendResponse({ ok: true })
+    })()
+    return true // 异步响应
+  } else if (msg?.type === 'v2d/mse-stage-write') {
+    // MSE 捕获数据块落盘（页面桥逐块等待本响应，天然串行）
+    void (async () => {
+      try {
+        let entry = mseWriters.get(msg.file)
+        if (!entry) {
+          const root = await navigator.storage.getDirectory()
+          const dir = await root.getDirectoryHandle('staging', { create: true })
+          const fh = await dir.getFileHandle(`${msg.file}.part`, { create: true })
+          const size = (await fh.getFile()).size
+          const w = await fh.createWritable({ keepExistingData: true })
+          await w.seek(size)
+          entry = { w, size }
+          mseWriters.set(msg.file, entry)
+        }
+        const chunk = Uint8Array.from(atob(msg.chunk), (c) => c.charCodeAt(0))
+        await entry.w.write(chunk)
+        entry.size += chunk.byteLength
+        sendResponse({ ok: true })
+      } catch (e) {
+        sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) })
       }
     })()
-    sendResponse({ ok: true })
+    return true
+  } else if (msg?.type === 'v2d/mse-stage-close') {
+    void (async () => {
+      const entry = mseWriters.get(msg.file)
+      if (entry) {
+        mseWriters.delete(msg.file)
+        try {
+          await entry.w.close()
+        } catch {
+          /* ignore */
+        }
+      }
+      sendResponse({ ok: true })
+    })()
+    return true
   } else if (msg?.type === 'getStagedBlob') {
     // Safari：管理页/弹窗请求待保存产物的 blob URL（可从 OPFS 重建，SW 重启后仍可保存）
     void (async () => {

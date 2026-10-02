@@ -42,6 +42,16 @@ export interface MediaCandidate {
   probed?: boolean
   /** 探测失败（如防盗链 403）——UI 置灰并提示 */
   probeError?: string
+  /** MSE 深捕获组（kind='blob' 时由捕获钩子填充；bytes 实时增长） */
+  mse?: {
+    groupId: string
+    mime: string
+    bytes: number
+    appends: number
+    trackKind: 'video' | 'audio' | 'combined'
+    /** 超出捕获上限，数据截断 */
+    overflow?: boolean
+  }
   discoveredAt: number
 }
 

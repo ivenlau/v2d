@@ -88,7 +88,9 @@ function extFromMime(mime: string): string {
   return table[base] ?? ''
 }
 
-/** 候选展示打分（高分在前）：playlist > 视频 mime/常见扩展 > 大文件 */
+/** 候选展示打分（高分在前）：playlist > 视频 mime/常见扩展 > 大文件。
+ *  blob（MSE 捕获）不吃 mime 加分——其 mime 是捕获元数据而非网络响应，
+ *  否则会压过同页的 DASH/直链候选（B站页面本身走 MSE，曾把 DASH 挤到第二位） */
 export function scoreCandidate(c: {
   kind: MediaKind
   mime?: string
@@ -98,8 +100,10 @@ export function scoreCandidate(c: {
   if (c.kind === 'hls') s += 40
   else if (c.kind === 'dash') s += 38
   else if (c.kind === 'file') s += 20
-  if (c.mime && /^video\//i.test(c.mime)) s += 30
-  else if (c.mime && /^audio\//i.test(c.mime)) s += 10
+  if (c.kind !== 'blob') {
+    if (c.mime && /^video\//i.test(c.mime)) s += 30
+    else if (c.mime && /^audio\//i.test(c.mime)) s += 10
+  }
   if (c.size) s += Math.min(25, Math.log2(c.size / 1024 + 1)) // 1KB→0, 1GB→20
   return s
 }

@@ -30,13 +30,19 @@ import {
   applyStagedReady,
   pollAppCommands,
   applyTaskEvent,
+  applyMseGroups,
   cancelTask,
   clearFinishedTasks,
   deleteTask,
+  enqueueMseTransfer,
   enqueueOffline,
   enqueueTransfer,
   finishDownloadTask,
   handleTaskBlob,
+  handleMseChunk,
+  handleMsePullDone,
+  handleMsePullMissing,
+  installRefererRules,
   invalidateTaskCache,
   lookupBlobName,
   listTasks,
@@ -45,7 +51,10 @@ import {
   recoverStuckTasks,
   resumeTask,
   retryTask,
+  startMsePreview,
+  watchPageSave,
 } from '@/background/transfer'
+import type { MseGroupInfo } from '@/background/transfer'
 
 // ── 设置缓存（storage.onChanged 失效） ──────────────────────────────────
 let settingsCache: Settings | null = null
@@ -181,10 +190,10 @@ async function scanDom(tabId: number): Promise<number> {
 
   const cands: MediaCandidate[] = []
   for (const item of result?.items ?? []) {
-    const blob = item.src.startsWith('blob:')
-    const cls = blob
-      ? { kind: 'blob' as const, ext: 'bin' }
-      : classifyRequest(item.src, item.type ?? undefined)
+    // blob: 引用不再登记候选——MSE 播放由深捕获钩子出正式的 MSE 卡（可下载）；
+    // 旧式 blob 卡是无下载入口的死卡，还会和 MSE 卡重复占位
+    if (item.src.startsWith('blob:')) continue
+    const cls = classifyRequest(item.src, item.type ?? undefined)
     if (!cls) continue
     const url = item.src
     const id = fingerprint(`${cls.kind}|${url}`)
@@ -196,7 +205,7 @@ async function scanDom(tabId: number): Promise<number> {
       kind: cls.kind,
       origin: 'dom',
       mime: item.type ?? undefined,
-      fileName: blob ? undefined : buildFileName({ url, ext: cls.ext }),
+      fileName: buildFileName({ url, ext: cls.ext }),
       discoveredAt: Date.now(),
     })
   }
@@ -397,6 +406,17 @@ async function handle(req: BgRequest): Promise<unknown> {
         return { ok: false, reason: e instanceof Error ? e.message : String(e) }
       }
     }
+    case 'mseDownload': {
+      const settings = await loadSettings()
+      try {
+        const task = await enqueueMseTransfer(req, settings.v115)
+        return { ok: true, taskId: task.id }
+      } catch (e) {
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) }
+      }
+    }
+    case 'msePreview':
+      return startMsePreview(req.tabId, req.groupId)
   }
 }
 
@@ -418,6 +438,9 @@ export default defineBackground(() => {
       if (changes['transfer.tasks']) invalidateTaskCache()
     }
   })
+
+  // 常驻 Referer 会话规则：传输拉流 + 弹窗视频预览的 CDN 防盗链都靠它（会话存活，幂等）
+  installRefererRules()
 
   // 引擎 A：观察式监听（MV3 允许观察，不允许阻断）
   chrome.webRequest.onBeforeRequest.addListener(
@@ -493,6 +516,9 @@ export default defineBackground(() => {
 
   chrome.runtime.onMessage.addListener(
     (req: BgRequest, _sender, sendResponse: (resp: unknown) => void) => {
+      // 内部事件（v2d/*）由下面的第二个监听器处理并应答——这里若抢答（哪怕 undefined）
+      // 会立即关闭消息端口，第二个监听器的异步应答全部失效（mse-chunk 背压曾被破坏）
+      if (typeof req?.type === 'string' && req.type.startsWith('v2d/')) return false
       handle(req)
         .then(sendResponse)
         .catch((e: unknown) =>
@@ -503,7 +529,7 @@ export default defineBackground(() => {
   )
 
   // offscreen worker 事件流（进度/终态）——同时也是 SW 保活信号
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'v2d/task-event') {
       void applyTaskEvent(msg)
     } else if (msg?.type === 'v2d/task-staged-ready') {
@@ -511,6 +537,9 @@ export default defineBackground(() => {
       void applyStagedReady(msg.taskId, msg.fileName ?? '', msg.size ?? 0)
     } else if (msg?.type === 'v2d/task-saved') {
       void markTaskSaved(msg.taskId)
+    } else if (msg?.type === 'v2d/task-saving') {
+      // 页面 <a download> 保存：SW 等浏览器下载终态再收口（完成删暂存 / 失败回待保存）
+      void watchPageSave(msg.taskId, msg.blobUrl)
     } else if (msg?.type === 'v2d/token-updated') {
       // worker 内上传途中轮换的新 token 回传持久化（其余上下文靠三段式恢复自愈）
       void chrome.storage.local.set({
@@ -519,6 +548,23 @@ export default defineBackground(() => {
     } else if (msg?.type === 'v2d/app-ping') {
       // 弹窗/设置页/悬浮球上报「我在运行」：顺手拉一次原生桥（App 侧写已启动标记 + 消费命令）
       void pollAppCommands().catch(() => {})
+    } else if (msg?.type === 'v2d/mse-groups') {
+      // MSE 捕获钩子上报摘要：登记分组（带 frameId，拉取时精准定向）+ upsert 候选
+      const tabId = sender.tab?.id
+      if (typeof tabId === 'number' && Array.isArray(msg.groups)) {
+        const frameId = sender.frameId ?? 0
+        void applyMseGroups(tabId, frameId, msg.groups as MseGroupInfo[])
+          .then(async () => updateBadge(tabId, (await listCandidates(tabId)).length))
+          .catch(() => {})
+      }
+    } else if (msg?.type === 'v2d/mse-chunk') {
+      // 数据块落盘（桥在 ack 前等待本响应——背压）
+      void handleMseChunk(msg.requestId, msg.data).then((ok) => sendResponse({ ok }))
+      return true
+    } else if (msg?.type === 'v2d/mse-pull-done') {
+      handleMsePullDone(msg.requestId)
+    } else if (msg?.type === 'v2d/mse-pull-missing') {
+      handleMsePullMissing(msg.requestId)
     }
     return false
   })

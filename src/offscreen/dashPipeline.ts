@@ -155,34 +155,88 @@ async function mergeDashToBlob(
   return new Blob([buffer], { type: 'video/mp4' })
 }
 
+/** Range 0-0 预探测轨道总大小（不拉数据；失败返回 0，进度退化为无 total） */
+async function probeTotal(url: string, signal: AbortSignal): Promise<number> {
+  try {
+    const r = await fetch(url, { signal, headers: { Range: 'bytes=0-0' } })
+    if (!r.ok) return 0
+    // 206 → content-range 里的总长；200（不支持 Range）→ content-length 即全长
+    const cr = r.headers.get('content-range')
+    const m = cr ? /\/(\d+)\s*$/.exec(cr) : null
+    const total = m ? Number(m[1]) : Number(r.headers.get('content-length')) || 0
+    await r.body?.cancel().catch(() => {})
+    return total
+  } catch {
+    return 0
+  }
+}
+
 export async function runDashToStage(opts: DashPipelineOptions): Promise<DashStageResult> {
   const { stage, emit, signal, wantHash, videoUrl, audioUrl, audioOptional } = opts
 
   emit({ state: 'downloading', segmentsTotal: audioUrl ? 2 : 1, segmentsDone: 0 })
-  const video = await fetchBlob(videoUrl, signal, () => {})
+
+  // 双轨总大小预探测：让下载全程有 received/size/speed（此前进度只在轨道完成时跳变）
+  const aLenProbe = audioUrl ? probeTotal(audioUrl, signal) : Promise.resolve(0)
+  const vLen = await probeTotal(videoUrl, signal)
+  const aLen = await aLenProbe
+  const sizeHint = vLen + aLen
+
+  // 跨轨道累计进度：fetchBlob 上报的是单轨绝对值，这里转增量并 500ms 节流 emit
+  let received = 0
+  let windowBytes = 0
+  let windowStart = Date.now()
+  let lastEmit = 0
+  const trackProgress = (): (abs: number) => void => {
+    let last = 0
+    return (abs: number) => {
+      const delta = abs - last
+      if (delta <= 0) return
+      last = abs
+      received += delta
+      windowBytes += delta
+      const now = Date.now()
+      if (now - lastEmit >= 500) {
+        const elapsed = (now - windowStart) / 1000
+        emit({
+          state: 'downloading',
+          received,
+          size: sizeHint || undefined,
+          speedBps: elapsed > 0.2 ? windowBytes / elapsed : 0,
+        })
+        if (elapsed > 2) {
+          windowBytes = 0
+          windowStart = now
+        }
+        lastEmit = now
+      }
+    }
+  }
+
+  const video = await fetchBlob(videoUrl, signal, trackProgress())
   emit({
     state: 'downloading',
     segmentsDone: 1,
     segmentsTotal: audioUrl ? 2 : 1,
     received: video.size,
-    size: video.size,
+    size: sizeHint || video.size,
   })
 
   let audio: Blob | undefined
   if (audioUrl) {
     try {
-      audio = await fetchBlob(audioUrl, signal, () => {})
+      audio = await fetchBlob(audioUrl, signal, trackProgress())
       emit({
         state: 'downloading',
         segmentsDone: 2,
         segmentsTotal: 2,
         received: video.size + audio.size,
-        size: video.size + audio.size,
+        size: sizeHint || video.size + audio.size,
       })
     } catch (e) {
       if (audioOptional && !signal.aborted) {
         audio = undefined
-        emit({ state: 'downloading', note: '音频轨不可用，仅合成视频' })
+        emit({ state: 'downloading', note: '音频轨不可用，仅合成视频', received: video.size, size: video.size })
       } else {
         throw e
       }

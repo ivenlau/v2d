@@ -1,16 +1,17 @@
 /**
  * HLS 下载管线（方案 §5.1，M3）：
  *   master → 自动选最高码率 → media playlist 详细解析 → 直播/不支持加密拒绝
- *   → 首段试转封装定模式（mp4 / ts 兜底；EXT-X-MAP 走 fMP4 原样拼接）
- *   → 窗口并发(4)下载 → AES-128 解密 → 按序写入 OPFS 暂存 + 增量 SHA1（wantHash 时）
- * 内存模型：单段字节 + 写窗口缓冲，与总时长无关（§6.3）。
+ *   → 窗口并发(4)下载 → AES-128 解密 → 整流 mediabunny 转封装 MP4
+ *     （H.265 等不支持的编码/超限回退原样拼接 .ts；EXT-X-MAP 的 fMP4 HLS 原样拼接）
+ *   → 写入 OPFS 暂存 + SHA1（wantHash 时）
+ * 内存模型：整流字节驻留内存（与 DASH 管线一致，§6.3），超限自动走 .ts 回退。
  */
 
 import { createSHA1 } from 'hash-wasm'
 import { parseM3U8, parseMediaPlaylist, decryptAes128Segment, ivForSegment } from '@/core/m3u8'
 import type { HlsEncryption, HlsSegment, MediaPlaylistDetails } from '@/core/m3u8'
 import type { OpfsStage } from '@/providers/115/staging'
-import { TsRemuxer } from './remux'
+import { remuxTsToMp4 } from './remux'
 
 export interface HlsPipelineOptions {
   stage: OpfsStage
@@ -30,6 +31,8 @@ export interface HlsStageResult {
 
 const WINDOW = 4
 const SEG_RETRIES = 3
+/** 整流驻留内存的上限：超过则跳过转封装直接原样 .ts（与 DASH 管线的 600MB 同一取舍） */
+const TS_REMUX_MAX_BYTES = 600 * 1024 * 1024
 
 async function fetchBuffer(
   url: string,
@@ -88,72 +91,35 @@ export async function runHlsToStage(playlistUrl: string, opts: HlsPipelineOption
   const segments = media.segments
   if (!segments.length) throw new Error('播放列表没有分段')
 
-  // 2. 首段试转封装决定产物格式（mp4 / ts 兜底）；EXT-X-MAP = fMP4 HLS 原样拼接
-  const remuxer = new TsRemuxer()
-  let mode: 'mp4' | 'ts' = 'mp4'
-  if (!media.mapUrl) {
-    try {
-      const raw = await fetchSegmentBuffer(segments[0], signal)
-      const out = await remuxer.remux(raw)
-      if (out.length === 0) throw new Error('无可转封装数据')
-    } catch {
-      mode = 'ts' // mux.js 不支持的编码（H.265 等）→ 原样合并 .ts
-    }
-  }
-
-  // 3. 窗口并发下载 + 按序写入 + 增量 SHA1
+  // 2. 窗口并发(4)下载 + AES-128 解密，按序累积。
+  //    TS 转封装需要完整连续的流，这里整流入内存（与 DASH 管线同一内存取舍，超限走 .ts 回退）
   const hasher = await createSHA1()
   hasher.init()
-  if (mode === 'mp4' && media.mapUrl) {
-    const init = await fetchBuffer(media.mapUrl, undefined, signal)
-    stage.write(init)
-    hasher.update(init)
-  }
-
-  const buffer = new Map<number, Uint8Array[]>()
-  let writeIdx = 0
-  let written = 0
+  const buffer = new Map<number, Uint8Array>()
   let doneCount = 0
+  let received = 0
   let lastEmit = 0
   let windowBytes = 0
   let windowStart = Date.now()
-
-  const flushInOrder = (): void => {
-    while (buffer.has(writeIdx)) {
-      for (const chunk of buffer.get(writeIdx)!) {
-        stage.write(chunk)
-        if (wantHash) hasher.update(chunk)
-        written += chunk.length
-      }
-      buffer.delete(writeIdx)
-      writeIdx += 1
-    }
-  }
 
   const processSegment = async (idx: number): Promise<void> => {
     const seg = segments[idx]
     for (let attempt = 0; ; attempt++) {
       try {
         const raw = await fetchSegmentBuffer(seg, signal)
-        let chunks: Uint8Array[]
-        if (mode === 'ts' || media.mapUrl) {
-          chunks = [raw]
-        } else {
-          let data = raw
-          if (seg.key) {
-            const keyBytes = await getKeyBytes(seg.key, signal)
-            data = await decryptAes128Segment(
-              data,
-              keyBytes,
-              ivForSegment(seg.key, media.mediaSequence + idx),
-            )
-          }
-          chunks = await remuxer.remux(data)
+        let data = raw
+        if (seg.key) {
+          const keyBytes = await getKeyBytes(seg.key, signal)
+          data = await decryptAes128Segment(
+            data,
+            keyBytes,
+            ivForSegment(seg.key, media.mediaSequence + idx),
+          )
         }
-        buffer.set(idx, chunks)
+        buffer.set(idx, data)
         doneCount += 1
+        received += raw.length
         windowBytes += raw.length
-        flushInOrder()
         const now = Date.now()
         if (now - lastEmit >= 500) {
           const elapsed = (now - windowStart) / 1000
@@ -161,7 +127,7 @@ export async function runHlsToStage(playlistUrl: string, opts: HlsPipelineOption
             state: 'downloading',
             segmentsDone: doneCount,
             segmentsTotal: segments.length,
-            received: written,
+            received,
             speedBps: elapsed > 0.2 ? windowBytes / elapsed : 0,
           })
           if (elapsed > 2) {
@@ -191,10 +157,43 @@ export async function runHlsToStage(playlistUrl: string, opts: HlsPipelineOption
   await Promise.all(workers)
   if (signal.aborted) throw new Error('cancelled')
 
+  // 3. 产物组装：fMP4 HLS（EXT-X-MAP）init+分段原样拼接即完整 fMP4；
+  //    TS HLS 整流转封装为 MP4（时间轴由 mediabunny 保证连续），不支持/超限回退原样 .ts
+  const ordered: Uint8Array[] = []
+  if (media.mapUrl) {
+    const init = await fetchBuffer(media.mapUrl, undefined, signal)
+    ordered.push(init)
+  }
+  for (let i = 0; i < segments.length; i++) ordered.push(buffer.get(i)!)
+  buffer.clear()
+
+  let ext: 'mp4' | 'ts' = media.mapUrl ? 'mp4' : 'ts'
+  let finalChunks = ordered
+  emit({ state: 'transmuxing' })
+  if (!media.mapUrl && received <= TS_REMUX_MAX_BYTES) {
+    try {
+      finalChunks = [await remuxTsToMp4(ordered, signal)]
+      ext = 'mp4'
+    } catch (e) {
+      if (signal.aborted) throw new Error('cancelled')
+      // H.265 等 mediabunny 不支持的编码 → 原样拼接 .ts（历史兜底行为）
+      finalChunks = ordered
+      ext = 'ts'
+    }
+  }
+
+  // 4. 写入暂存 + SHA1（wantHash 时）
+  let written = 0
+  for (const chunk of finalChunks) {
+    stage.write(chunk)
+    if (wantHash) hasher.update(chunk)
+    written += chunk.length
+  }
+
   return {
     sha1: hasher.digest('hex'),
-    size: stage.size,
-    ext: mode === 'mp4' ? 'mp4' : 'ts',
+    size: written,
+    ext,
     segmentsTotal: segments.length,
     durationSec: media.totalDuration,
   }

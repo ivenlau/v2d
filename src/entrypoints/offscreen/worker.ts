@@ -17,6 +17,7 @@ import { fastUpload115 } from '@/providers/115/upload115'
 import { OpfsStage } from '@/providers/115/staging'
 import { runHlsToStage } from '@/offscreen/hlsPipeline'
 import { runDashToStage } from '@/offscreen/dashPipeline'
+import { mergeTrackBlobs } from '@/offscreen/remux'
 
 interface WorkerCtx {
   addEventListener(type: 'message', cb: (e: MessageEvent) => void): void
@@ -26,8 +27,8 @@ const ctx = self as unknown as WorkerCtx
 
 export interface WorkerTask {
   id: string
-  /** direct = 直链单文件；hls = m3u8 分段合并；dash = 双轨 DASH 合并（M5） */
-  kind: 'direct' | 'hls' | 'dash'
+  /** direct = 直链单文件；hls = m3u8 分段合并；dash = 双轨 DASH 合并（M5）；mse = 深捕获合并 */
+  kind: 'direct' | 'hls' | 'dash' | 'mse'
   /** cloud = 转存 115；local = 保存本地（Safari 直链/HLS/DASH 走队列） */
   dest: 'cloud' | 'local'
   url: string
@@ -37,6 +38,8 @@ export interface WorkerTask {
   variantUrl?: string
   /** dash：双轨 DASH 描述符（视频轨 + 可选音频轨直链） */
   dashSpec?: { video: string; audio?: string; audioOptional?: boolean }
+  /** mse：已拉回暂存的捕获轨道文件名（staging/{file}.part）与容器 */
+  msePull?: { videoFile: string; audioFile?: string; container: 'mp4' | 'webm' }
   /** 断点续传元数据（SW 持久化后随任务下发） */
   hashStateB64?: string
   received?: number
@@ -102,6 +105,7 @@ async function runTask(task: WorkerTask): Promise<void> {
   try {
     if (task.kind === 'hls') await runHlsTask(task, ctrl, emit)
     else if (task.kind === 'dash') await runDashTask(task, ctrl, emit)
+    else if (task.kind === 'mse') await runMseTask(task, ctrl, emit)
     else await runDirectTask(task, ctrl, emit)
   } catch (e) {
     // runTask 内部各自 catch；到这里说明框架层异常
@@ -343,6 +347,96 @@ async function runDashTask(
     await stage.dispose()
     stage = null
     emit({ state: 'done', size: result.size, pickCode: res.pickCode, instant: res.instant })
+  } catch (err) {
+    await stage?.dispose()
+    emit({
+      state: ctrl.signal.aborted ? 'cancelled' : 'failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+// ── MSE 深捕获任务（引擎 C）：读取页面拉回的轨道暂存 → 合并/直通 → 待保存或转存 ──
+async function readStagedFile(name: string): Promise<Blob> {
+  const root = await navigator.storage.getDirectory()
+  const dir = await root.getDirectoryHandle('staging')
+  const fh = await dir.getFileHandle(`${name}.part`)
+  return fh.getFile()
+}
+
+async function runMseTask(
+  task: WorkerTask,
+  ctrl: AbortController,
+  emit: (patch: Record<string, unknown>) => void,
+): Promise<void> {
+  let stage: OpfsStage | null = null
+  try {
+    const pull = task.msePull
+    if (!pull) throw new Error('任务缺少捕获数据信息')
+    const client = getClientFor(task)
+    emit({ state: 'downloading' })
+    const cid = task.dest === 'cloud' ? await client.createDirRecursive(task.targetPath) : 0
+
+    const vBlob = pull.videoFile ? await readStagedFile(pull.videoFile) : null
+    const aBlob = pull.audioFile ? await readStagedFile(pull.audioFile) : null
+    if (!vBlob && !aBlob) throw new Error('捕获数据缺失')
+
+    const hasher = await createSHA1()
+    hasher.init()
+    stage = await OpfsStage.open(task.id)
+    if (stage.size > 0) stage.reset()
+
+    let fileName = task.fileName
+    let size = 0
+    if (vBlob && aBlob) {
+      emit({ state: 'transmuxing' })
+      const merged = await mergeTrackBlobs(vBlob, aBlob, ctrl.signal)
+      stage.write(merged)
+      hasher.update(merged)
+      size = merged.byteLength
+      fileName = withExt(fileName, 'mp4')
+    } else {
+      // 单轨/combined 捕获：容器原样直通（webm 捕获保持 webm）
+      const blob = (vBlob ?? aBlob)!
+      fileName = withExt(fileName, pull.container === 'webm' ? 'webm' : 'mp4')
+      const reader = blob.stream().getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        stage.write(value)
+        hasher.update(value)
+        size += value.byteLength
+      }
+    }
+
+    if (task.dest === 'cloud') {
+      emit({ state: 'checking', size })
+      emit({ state: 'uploading', uploaded: 0, size })
+      let lastUp = 0
+      const res = await fastUpload115(client, {
+        fileName,
+        size,
+        cid,
+        sha1Hex: hasher.digest('hex'),
+        source: stage.byteSource(),
+        signal: ctrl.signal,
+        onUploaded: (uploaded, total) => {
+          const now = Date.now()
+          if (now - lastUp >= 500 || uploaded >= total) {
+            emit({ state: 'uploading', uploaded, size: total })
+            lastUp = now
+          }
+        },
+      })
+      await stage.dispose()
+      stage = null
+      emit({ state: 'done', size, pickCode: res.pickCode, instant: res.instant })
+    } else {
+      emit({ state: 'hashing', received: size, size })
+      await stage.close()
+      stage = null
+      ctx.postMessage({ type: 'v2d/task-staged', taskId: task.id, fileName, size })
+    }
   } catch (err) {
     await stage?.dispose()
     emit({

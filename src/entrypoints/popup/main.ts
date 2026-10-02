@@ -9,12 +9,13 @@ import { hostInBlacklist, scoreCandidate } from '@/core/sniffer/patterns'
 import { humanizeError } from '@/core/humanize'
 import type { HlsVariant, MediaCandidate } from '@/core/types'
 import { loadSettings, saveSettings } from '@/core/settings'
+import { saveStagedProduct } from '@/core/stagedSave'
 
 const KIND_LABEL: Record<string, string> = {
   hls: 'HLS',
   dash: 'DASH',
-  file: '直链',
-  blob: '内嵌流',
+  file: 'HTTP',
+  blob: 'MSE',
 }
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
@@ -30,19 +31,21 @@ const renames = new Map<string, string>()
 
 const ICON_VIDEO =
   '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>'
+const ICON_AUDIO =
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>'
 const ICON_PENCIL =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>'
 const ICON_CARET =
   '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>'
 
-/** 可预览直链：file 类 + 视频扩展名/mime（HLS/DASH 无法直接出帧，显示占位块） */
 const VIDEO_EXT = /\.(mp4|webm|m4v|ogv|mov)([?#]|$)/i
+/** 可预览候选：file 直链（按扩展名/mime 判定）；DASH 放行——其视频轨 m4s 是自包含
+ *  渐进式 fMP4，靠常驻 Referer 规则过 CDN 防盗链后 <video> 可直接出帧（无声，失败自动
+ *  回退占位块）；HLS 清单（m3u8）无法直接出帧，仍显示占位块。 */
 function previewable(c: MediaCandidate): boolean {
-  return (
-    c.kind === 'file' &&
-    !c.probeError &&
-    (VIDEO_EXT.test(c.url) || (c.mime?.startsWith('video/') ?? false))
-  )
+  if (c.probeError) return false
+  if (c.kind === 'dash') return true
+  return c.kind === 'file' && (VIDEO_EXT.test(c.url) || (c.mime?.startsWith('video/') ?? false))
 }
 
 function effectiveName(c: MediaCandidate): string {
@@ -86,26 +89,19 @@ function toast(msg: string): void {
 }
 
 function metaLine(c: MediaCandidate): string {
-  const parts: string[] = []
-  if (c.kind === 'hls' || c.kind === 'dash') {
-    if (c.variants?.length) parts.push(`${c.variants.length} 种清晰度`)
-    if (c.segments) parts.push(`${c.segments} 分段`)
-    if (c.durationSec) parts.push(fmtDuration(c.durationSec))
-    if (c.live) parts.push('直播流')
-    if (c.encrypted) parts.push('AES 加密')
-  } else if (!c.size) {
-    // 大小已知时直接以水印形式盖在缩略图左下角，不重复占元信息行
-    parts.push('大小未知')
-  }
-  if (c.probeError) parts.push(`探测失败(${c.probeError})`)
-  return parts.join(' · ')
+  // 正常卡片固定两行（标题 + 按钮），元信息一律不占行：
+  // 清晰度数在下拉里可见、大小以水印盖在缩略图上、时长/分段/加密在「解析信息」里、
+  // 直播有专门提示。仅探测失败（按钮被禁用的原因）保留一行。
+  return c.probeError ? `探测失败(${c.probeError})` : ''
 }
 
 /** 占位缩略块：视频图标 + 类型短标 */
-function makePh(c: MediaCandidate): HTMLElement {
+function makePh(c: MediaCandidate, audio = false): HTMLElement {
   const ph = document.createElement('div')
   ph.className = 'ph'
-  ph.innerHTML = ICON_VIDEO
+  // MSE 捕获的音频轨 / 无画面的音频文件：占位图标用喇叭（无画面可预览）
+  const isAudio = audio || (c.kind === 'blob' && c.mse?.trackKind === 'audio')
+  ph.innerHTML = isAudio ? ICON_AUDIO : ICON_VIDEO
   const label = document.createElement('span')
   label.className = 'ph-label'
   label.textContent = KIND_LABEL[c.kind] ?? c.kind
@@ -113,7 +109,139 @@ function makePh(c: MediaCandidate): HTMLElement {
   return ph
 }
 
+/** MSE 捕获预览的 blob URL 缓存（弹窗生命周期内复用，避免每次渲染重拉） */
+const msePreviewUrls = new Map<string, string>()
+
+/** 拉取捕获组前若干 MB 生成 <video> 可播的 blob URL（后台限量拉取，读完即弃暂存） */
+async function loadMsePreviewUrl(c: MediaCandidate): Promise<{ url: string | null; reason?: string }> {
+  const cached = msePreviewUrls.get(c.id)
+  if (cached) return { url: cached }
+  try {
+    const r = await send<{ ok: boolean; file?: string; reason?: string }>({
+      type: 'msePreview',
+      tabId,
+      groupId: c.mse!.groupId,
+    })
+    if (!r?.ok || !r.file) return { url: null, reason: r?.reason ?? '后台无响应' }
+    const root = await navigator.storage.getDirectory()
+    const dir = await root.getDirectoryHandle('staging')
+    const fh = await dir.getFileHandle(`${r.file}.part`)
+    const file = await fh.getFile()
+    if (file.size === 0) return { url: null, reason: '捕获数据为空' }
+    const url = URL.createObjectURL(file)
+    msePreviewUrls.set(c.id, url)
+    // blob 已独立持有了数据副本，临时暂存立刻清理（dispose-file 由 offscreen 处理）
+    void chrome.runtime.sendMessage({ type: 'v2d/dispose-file', taskId: r.file }).catch(() => {})
+    return { url }
+  } catch (e) {
+    return { url: null, reason: String(e instanceof Error ? e.message : e) }
+  }
+}
+
+/** HLS 预览实例缓存（候选 id → video + hls）：弹窗重渲染时复用同一播放器 */
+const hlsPreviewCache = new Map<string, { v: HTMLVideoElement; hls: import('hls.js').default }>()
+
+/** HLS 卡预览：Chrome 原生 <video> 不认 m3u8，用 hls.js（MSE）挂载。
+ *  hls.js 动态 import 按需加载（不拖慢弹窗首屏）；出帧即暂停 + 缓冲上限 5s 限制拉流量；
+ *  失败（DRM/防盗链/解析错误）回退占位块。直播流不预览（会持续拉流）。 */
+function mountHlsPreview(c: MediaCandidate, thumb: HTMLElement): void {
+  const cached = hlsPreviewCache.get(c.id)
+  if (cached) {
+    thumb.appendChild(cached.v)
+    return
+  }
+  thumb.appendChild(makePh(c))
+  void (async () => {
+    let Hls: typeof import('hls.js').default
+    try {
+      ({ default: Hls } = await import('hls.js'))
+    } catch {
+      return
+    }
+    if (!thumb.isConnected || hlsPreviewCache.has(c.id) || !Hls.isSupported()) return
+    const v = document.createElement('video')
+    v.muted = true
+    v.playsInline = true
+    v.disablePictureInPicture = true
+    const hls = new Hls({ maxBufferLength: 5, maxMaxBufferLength: 10 })
+    let settled = false
+    const fail = (): void => {
+      if (settled) return
+      settled = true
+      hls.destroy()
+      hlsPreviewCache.delete(c.id)
+      v.remove()
+      if (thumb.isConnected) thumb.appendChild(makePh(c))
+    }
+    hls.on(Hls.Events.ERROR, (_e, data) => {
+      if (data.fatal) fail()
+    })
+    v.addEventListener(
+      'loadeddata',
+      () => {
+        if (settled || !thumb.isConnected) return
+        settled = true
+        // 定位到近起始帧出画面并暂停：预览只需要首帧，不再持续拉流
+        if (v.duration > 1) v.currentTime = 0.5
+        v.pause()
+        thumb.querySelectorAll('.ph').forEach((el) => el.remove())
+        thumb.appendChild(v)
+        hlsPreviewCache.set(c.id, { v, hls })
+        // 缓存上限与缩略图数一致：超出销毁最早的实例
+        while (hlsPreviewCache.size > 8) {
+          const oldest = hlsPreviewCache.keys().next().value
+          if (oldest === undefined) break
+          const inst = hlsPreviewCache.get(oldest)!
+          hlsPreviewCache.delete(oldest)
+          inst.hls.destroy()
+        }
+      },
+      { once: true },
+    )
+    hls.loadSource(c.url)
+    hls.attachMedia(v)
+  })()
+}
+
+/** MSE 捕获的视频轨预览：占位块 → 限量拉取就绪后换成 <video> 首帧（瞬时失败重试） */
+function mountMseVideoPreview(c: MediaCandidate, thumb: HTMLElement): void {
+  const attempt = async (n: number): Promise<void> => {
+    const { url, reason } = await loadMsePreviewUrl(c)
+    if (!url) {
+      if (n > 0 && thumb.isConnected) {
+        await new Promise((r) => setTimeout(r, 1500))
+        void attempt(n - 1)
+        return
+      }
+      // 失败原因挂在占位块上（悬停可见），便于区分「页面已刷新」/「拉取超时」等场景
+      const ph = thumb.querySelector('.ph') as HTMLElement | null
+      if (ph && thumb.isConnected) ph.title = `预览不可用：${reason ?? '未知原因'}`
+      return
+    }
+    if (!thumb.isConnected) return
+    const v = document.createElement('video')
+    v.muted = true
+    v.preload = 'metadata'
+    v.disablePictureInPicture = true
+    v.src = `${url}#t=0.5`
+    v.addEventListener(
+      'error',
+      () => {
+        v.remove()
+        thumb.appendChild(makePh(c))
+      },
+      { once: true },
+    )
+    thumb.querySelectorAll('.ph').forEach((el) => el.remove())
+    thumb.appendChild(v)
+  }
+  void attempt(2)
+}
+
+let currentList: MediaCandidate[] = []
+
 function render(list: MediaCandidate[]): void {
+  currentList = list
   const container = $('#list')
   container.querySelectorAll('.item').forEach((el) => el.remove())
   $('#count').textContent = list.length ? `共 ${list.length} 个候选` : ''
@@ -136,6 +264,17 @@ function render(list: MediaCandidate[]): void {
       // #t=0.5 让浏览器定位到近起始帧出画面；已有 fragment 的 URL 不重复追加
       v.src = c.url.includes('#') ? c.url : `${c.url}#t=0.5`
       v.addEventListener(
+        'loadedmetadata',
+        () => {
+          // 音频文件（.mp4 扩展名的 m4a 等）：videoWidth=0 无画面，黑帧难看 → 换喇叭占位
+          if (v.videoWidth === 0) {
+            v.remove()
+            thumb.appendChild(makePh(c, true))
+          }
+        },
+        { once: true },
+      )
+      v.addEventListener(
         'error',
         () => {
           v.remove()
@@ -144,6 +283,16 @@ function render(list: MediaCandidate[]): void {
         { once: true },
       )
       thumb.appendChild(v)
+    } else if (c.kind === 'blob' && c.mse && c.mse.trackKind !== 'audio' && thumbCount < 8) {
+      // MSE 捕获视频轨：先占位，后台限量拉到数据后换 <video> 首帧
+      thumbCount++
+      thumb.appendChild(makePh(c))
+      mountMseVideoPreview(c, thumb)
+    } else if (c.kind === 'hls' && !c.live && thumbCount < 8) {
+      // HLS：Chrome 原生不认 m3u8，hls.js 挂载预览（失败回退占位块）
+      thumbCount++
+      thumb.appendChild(makePh(c))
+      mountHlsPreview(c, thumb)
     } else {
       thumb.appendChild(makePh(c))
     }
@@ -296,11 +445,80 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeSplitMenu()
 })
 
+/** MSE 捕获下载提交（视频卡自动携带音频配对组合并） */
+async function submitMseDownload(
+  c: MediaCandidate,
+  audioPartner: MediaCandidate | undefined,
+  btn: HTMLButtonElement,
+): Promise<void> {
+  btn.disabled = true
+  const r = await send<{ ok: boolean; reason?: string; error?: string }>({
+    type: 'mseDownload',
+    tabId,
+    videoGroupId: c.mse!.groupId,
+    audioGroupId: audioPartner?.mse?.groupId,
+    pageTitle: tabTitle,
+    fileName: c.fileName,
+  })
+  if (r?.ok) {
+    toast('已加入下载队列')
+    void renderTasks()
+  } else {
+    toast(r?.reason ?? r?.error ?? '提交失败')
+  }
+  btn.disabled = false
+}
+
 function appendActions(actions: HTMLElement, c: MediaCandidate, item: HTMLElement): void {
   if (c.kind === 'blob') {
+    if (c.mse) {
+      // 深捕获卡片：与 DASH/HLS 相同的 split 结构——[下载][▾ 复制链接]。
+      // 视频轨卡自动配对音频轨合并；无音频配对时产物无声（按钮 title 提示，
+      // 不再占一行 note）；MIME 编码组合由 worker 侧 mediabunny 兜底。
+      const isAudioCard = c.mse.trackKind === 'audio'
+      const audioPartner = isAudioCard
+        ? undefined
+        : currentList.find((x) => x.kind === 'blob' && x.mse?.trackKind === 'audio')
+      const split = document.createElement('div')
+      split.className = 'split'
+      const main = document.createElement('button')
+      main.className = 'split-main'
+      main.textContent = '下载'
+      main.disabled = !(c.mse.bytes > 0)
+      main.title = isAudioCard
+        ? '保存捕获的音频轨'
+        : audioPartner
+          ? '合并视频与音频轨为 MP4'
+          : '未捕获音频轨，产物无声音'
+      main.addEventListener('click', () => void submitMseDownload(c, audioPartner, main))
+      const caret = document.createElement('button')
+      caret.className = 'split-caret'
+      caret.title = '更多操作'
+      caret.innerHTML = ICON_CARET
+      const menu = document.createElement('div')
+      menu.className = 'menu'
+      const copyItem = document.createElement('button')
+      copyItem.className = 'menu-item'
+      copyItem.textContent = '复制链接'
+      copyItem.addEventListener('click', () => void copyLink(c))
+      menu.appendChild(copyItem)
+      caret.addEventListener('click', (e) => {
+        e.stopPropagation()
+        toggleSplitMenu(menu, caret, $('#list'))
+      })
+      split.append(main, caret, menu)
+      actions.appendChild(split)
+      if (c.mse.overflow) {
+        const note = document.createElement('div')
+        note.className = 'note'
+        note.textContent = '捕获超过上限，数据已截断'
+        actions.appendChild(note)
+      }
+      return
+    }
     const note = document.createElement('div')
     note.className = 'note'
-    note.textContent = '页面 MSE 内嵌流：暂不支持，深捕获开发中'
+    note.textContent = '页面 MSE 内嵌流：捕获未启用'
     actions.appendChild(note)
     return
   }
@@ -343,7 +561,9 @@ function appendActions(actions: HTMLElement, c: MediaCandidate, item: HTMLElemen
       }
       toggleSplitMenu(qMenu, qBtn, $('#list'))
     })
+    // 菜单是 .split 内的绝对定位元素（.q-menu 靠它生效）——漏了挂载会永远打不开
     split.appendChild(qBtn)
+    split.appendChild(qMenu)
   }
 
   const main = document.createElement('button')
@@ -621,7 +841,7 @@ $('#open-manager').addEventListener('click', () => {
 // ── 115 转存任务进度（popup 内轻展示，管理页在 M4 交付） ────────────────
 interface TaskView {
   id: string
-  kind: 'offline' | 'upload' | 'hls'
+  kind: 'offline' | 'upload' | 'hls' | 'dash'
   dest: 'cloud' | 'local'
   state: string
   fileName: string
@@ -638,7 +858,7 @@ interface TaskView {
 
 const IS_IOS = /iP(hone|od|ad)/.test(navigator.userAgent)
 
-/** 读 OPFS 待保存产物并触发 <a download>（扩展页面内，文件名受控）。
+/** 读 OPFS 待保存产物并触发浏览器下载（终态收口在 SW：完成删暂存 / 失败回待保存）。
  *  iOS：popup 内 blob 下载不可靠（WebKitBlobResource 1）→ 跳转传输管理页走 Web Share。 */
 async function saveStagedTask(t: TaskView): Promise<void> {
   if (IS_IOS) {
@@ -646,21 +866,7 @@ async function saveStagedTask(t: TaskView): Promise<void> {
     return
   }
   try {
-    const root = await navigator.storage.getDirectory()
-    const dir = await root.getDirectoryHandle('staging')
-    const fh = await dir.getFileHandle(`${t.id}.part`)
-    const file = await fh.getFile()
-    if (file.size === 0) throw new Error('暂存文件为空')
-    const url = URL.createObjectURL(file)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = t.stagedFileName ?? t.fileName
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 30_000)
-    await new Promise((res) => setTimeout(res, 800))
-    await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId: t.id })
+    await saveStagedProduct(t.id, t.stagedFileName ?? t.fileName)
     await renderTasks()
   } catch (e) {
     toast(`保存失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -706,7 +912,7 @@ async function renderTasks(): Promise<void> {
     const pct = taskPercent(t)
     const segs =
       t.segmentsTotal && t.segmentsDone !== undefined
-        ? ` 分段 ${t.segmentsDone}/${t.segmentsTotal}`
+        ? ` ${t.kind === 'dash' ? '轨道' : '分段'} ${t.segmentsDone}/${t.segmentsTotal}`
         : ''
     const meta = `${pct !== null ? pct + '%' : ''}${t.speedBps ? ' · ' + fmtSpeed(t.speedBps) : ''}${segs}`.trim()
     row.innerHTML = `
@@ -745,7 +951,8 @@ async function renderTasks(): Promise<void> {
     }
     if (actions.children.length) row.appendChild(actions)
     row.querySelector('.task-cancel')?.addEventListener('click', async () => {
-      await send({ type: 'transferCancel', taskId: t.id })
+      // staged 无「取消」语义（管线已结束）：× 等价于管理页的「放弃」（删除任务+暂存）
+      await send({ type: t.state === 'staged' ? 'transferDelete' : 'transferCancel', taskId: t.id })
       await renderTasks()
     })
     box.appendChild(row)

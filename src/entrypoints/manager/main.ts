@@ -6,11 +6,12 @@
 import '@/entrypoints/manager/manager.css'
 import { humanizeError } from '@/core/humanize'
 import { send } from '@/core/messages'
+import { saveStagedProduct } from '@/core/stagedSave'
 import { loadSettings } from '@/core/settings'
 
 interface TaskView {
   id: string
-  kind: 'offline' | 'upload' | 'hls'
+  kind: 'offline' | 'upload' | 'hls' | 'dash' | 'mse'
   dest: 'cloud' | 'local'
   state: string
   fileName: string
@@ -73,7 +74,7 @@ function taskMeta(t: TaskView): string {
   }
   if (t.speedBps) bits.push(fmtSpeed(t.speedBps))
   if (t.segmentsTotal && t.segmentsDone !== undefined) {
-    bits.push(`分段 ${t.segmentsDone}/${t.segmentsTotal}`)
+    bits.push(`${t.kind === 'dash' ? '轨道' : '分段'} ${t.segmentsDone}/${t.segmentsTotal}`)
   }
   if (t.instant) bits.push('秒传命中')
   return bits.join(' · ')
@@ -176,19 +177,18 @@ function shareableFile(file: File, name: string): File {
   return new File([file], name, { type })
 }
 
-/** Safari：读 OPFS 待保存产物并触发保存（必须由用户点击手势调用）。
- *  iOS：Web Share API 调起系统分享面板，用户选「存储到文件」；
- *  其余平台：保持 <a download> 下载。用户取消分享不算失败，任务保持待保存可重试。 */
+/** 待保存产物的保存入口：iOS 走 Web Share；桌面走共用 helper（SW 依下载终态收口，
+ *  页面绝不在点击后删暂存——那会让 Chrome 下载因数据源被删而 NETWORK_FAILED）。 */
 async function saveStagedById(taskId: string): Promise<void> {
   const t = lastTasks.find((x) => x.id === taskId)
   const name = t?.stagedFileName ?? t?.fileName ?? 'video.mp4'
-  const root = await navigator.storage.getDirectory()
-  const dir = await root.getDirectoryHandle('staging')
-  const fh = await dir.getFileHandle(`${taskId}.part`)
-  const file = await fh.getFile()
-  if (file.size === 0) throw new Error('暂存文件为空')
 
   if (IS_IOS && typeof navigator.canShare === 'function') {
+    const root = await navigator.storage.getDirectory()
+    const dir = await root.getDirectoryHandle('staging')
+    const fh = await dir.getFileHandle(`${taskId}.part`)
+    const file = await fh.getFile()
+    if (file.size === 0) throw new Error('暂存文件为空')
     const share = shareableFile(file, name)
     if (!navigator.canShare({ files: [share] })) throw new Error('系统不支持分享保存该文件')
     try {
@@ -198,23 +198,17 @@ async function saveStagedById(taskId: string): Promise<void> {
       if (e instanceof DOMException && (e.name === 'AbortError' || e.name === 'NotAllowedError')) return
       throw e
     }
-  } else {
-    const url = URL.createObjectURL(file)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = name
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 30_000)
+    try {
+      await dir.removeEntry(`${taskId}.part`)
+    } catch {
+      /* ignore */
+    }
+    await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId })
+    await refresh()
+    return
   }
 
-  try {
-    await dir.removeEntry(`${taskId}.part`)
-  } catch {
-    /* ignore */
-  }
-  await chrome.runtime.sendMessage({ type: 'v2d/task-saved', taskId })
+  await saveStagedProduct(taskId, name)
   await refresh()
 }
 
